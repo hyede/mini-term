@@ -13,6 +13,7 @@ import {
   PROTOCOL_VERSION,
   type CommandFailReason,
   type MirrorMessage,
+  type DesktopDevice,
   type MobileHello,
   type MobileLauncher,
   type MobileProject,
@@ -23,6 +24,20 @@ import {
 } from './protocol';
 
 const CRED_KEY = 'mt-mobile-credential';
+const DESKTOP_KEY = 'mt-mobile-desktop';
+let pendingSelection: string | null = null;
+
+function selectedDesktop(): string | undefined {
+  try { return localStorage.getItem(DESKTOP_KEY) ?? undefined; }
+  catch { return undefined; }
+}
+
+function saveDesktop(desktopId: string | null) {
+  try {
+    if (desktopId) localStorage.setItem(DESKTOP_KEY, desktopId);
+    else localStorage.removeItem(DESKTOP_KEY);
+  } catch {}
+}
 
 /**
  * 发起会话后等待 pane 出现在活跃列表里的上限。
@@ -82,6 +97,8 @@ export interface StartSessionState {
 }
 
 interface RelayStore {
+  devices: DesktopDevice[];
+  selectedDesktopId: string | null;
   phase: Phase;
   rejectReason: MobileRejectReason | null;
   /** 桌面端在线状态;null = 尚未收到 presence */
@@ -99,6 +116,8 @@ interface RelayStore {
 }
 
 export const useRelayStore = create<RelayStore>(() => ({
+  devices: [],
+  selectedDesktopId: selectedDesktop() ?? null,
   phase: 'idle',
   rejectReason: null,
   desktopOnline: null,
@@ -208,6 +227,7 @@ function backoffMs(attempt: number): number {
  * 凭证也不认时按「配对码无效」提示——用户要的是新二维码,不是「凭证已失效」。
  */
 function connect(auth: { pairingCode?: string; credential?: string; staleCode?: boolean }) {
+  pendingSelection = null;
   stopped = false;
   snapshotReady = false;
   if (auth.pairingCode) {
@@ -219,11 +239,15 @@ function connect(auth: { pairingCode?: string; credential?: string; staleCode?: 
   const socket = new WebSocket(wsUrl());
   ws = socket;
   let handshakeDone = false;
+  let subscriptionsRestored = false;
 
   socket.onopen = () => {
     const hello: MobileHello = {
       type: 'hello',
       protocolVersion: PROTOCOL_VERSION,
+      desktopId: selectedDesktop(),
+      deviceName: navigator.userAgent.includes('iPhone') ? 'iPhone' : navigator.userAgent.includes('Android') ? 'Android' : 'Mobile browser',
+      multiDevice: true,
       ...(auth.pairingCode ? { pairingCode: auth.pairingCode } : {}),
       ...(auth.credential ? { credential: auth.credential } : {}),
     };
@@ -237,17 +261,33 @@ function connect(auth: { pairingCode?: string; credential?: string; staleCode?: 
     } catch {
       return;
     }
+    const desktopId = (msg as RelayToMobile & { desktopId?: string }).desktopId;
+    if (desktopId !== undefined && desktopId !== useRelayStore.getState().selectedDesktopId) return;
     switch (msg.type) {
+      case 'desktopList': {
+        if (pendingSelection && msg.selectedDesktopId !== pendingSelection) break;
+        pendingSelection = null;
+        const previous = useRelayStore.getState().selectedDesktopId;
+        if (previous !== msg.selectedDesktopId) {
+          finishStart(null);
+          snapshotReady = false;
+          useRelayStore.setState({ projects: [], launchers: [], mirror: null, desktopOnline: null });
+        }
+        useRelayStore.setState({ devices: msg.devices, selectedDesktopId: msg.selectedDesktopId });
+        saveDesktop(msg.selectedDesktopId);
+        if (!subscriptionsRestored) {
+          subscriptionsRestored = true;
+          const { mirror } = useRelayStore.getState();
+          if (mirror && !mirror.closed) sendToRelay({ type: 'subscribePane', paneId: mirror.paneId });
+        }
+        break;
+      }
       case 'helloAck': {
         handshakeDone = true;
         reconnectAttempt = 0;
         if (msg.credential) saveCredential(msg.credential);
         setPhase('connected');
         // 断线前若在看某个镜像:重连后自动恢复订阅(桌面端会重发快照)
-        const { mirror } = useRelayStore.getState();
-        if (mirror && !mirror.closed) {
-          sendToRelay({ type: 'subscribePane', paneId: mirror.paneId });
-        }
         break;
       }
       case 'helloReject': {
@@ -522,6 +562,24 @@ export function closeMirror() {
   const { mirror } = useRelayStore.getState();
   if (mirror) sendToRelay({ type: 'unsubscribePane', paneId: mirror.paneId });
   useRelayStore.setState({ mirror: null });
+}
+
+export function selectDesktop(desktopId: string) {
+  const state = useRelayStore.getState();
+  if (state.phase !== 'connected' || state.selectedDesktopId === desktopId
+      || state.mirror?.pendingCommandId || state.starting) return;
+  closeMirror();
+  pendingSelection = desktopId;
+  pendingPaneId = null;
+  snapshotReady = false;
+  saveDesktop(desktopId);
+  useRelayStore.setState({ selectedDesktopId: desktopId, projects: [], launchers: [], desktopOnline: null });
+  sendToRelay({ type: 'selectDesktop', desktopId });
+}
+
+export function releaseControl() {
+  const { mirror } = useRelayStore.getState();
+  if (mirror && !mirror.pendingCommandId) sendToRelay({ type: 'releaseControl', paneId: mirror.paneId });
 }
 
 // ── 发起新 AI 会话 ──

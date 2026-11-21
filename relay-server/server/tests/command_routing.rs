@@ -67,6 +67,9 @@ async fn desktop_handshake(addr: SocketAddr) -> WsClient {
     send_json(
         &mut ws,
         &DesktopToRelay::Hello {
+            desktop_id: "desktop".into(),
+            desktop_name: "Desktop".into(),
+            device_key: "test-device-key".into(),
             protocol_version: PROTOCOL_VERSION,
             desktop_key: DESKTOP_KEY.into(),
         },
@@ -94,6 +97,9 @@ async fn paired_mobile(addr: SocketAddr, desktop: &mut WsClient) -> WsClient {
     send_json(
         &mut mobile,
         &MobileToRelay::Hello {
+            desktop_id: None,
+            device_name: "Mobile".into(),
+            multi_device: false,
             protocol_version: PROTOCOL_VERSION,
             pairing_code: Some(code),
             credential: None,
@@ -135,21 +141,22 @@ async fn command_routes_to_desktop_and_receipt_returns() {
         },
     )
     .await;
-    assert_eq!(
-        recv_json::<RelayToDesktop>(&mut desktop).await,
-        Some(RelayToDesktop::MobileCommand {
-            pane_id: "pane-1".into(),
-            command_id: "cmd-1".into(),
-            text: "npm test".into(),
-        })
-    );
+    let forwarded = recv_json::<RelayToDesktop>(&mut desktop).await.unwrap();
+    let route_id = match &forwarded {
+        RelayToDesktop::MobileCommand { command_id, .. } => command_id.clone(),
+        _ => panic!("expected mobile command"),
+    };
+    assert_ne!(route_id, "cmd-1");
+    assert_eq!(forwarded, RelayToDesktop::MobileCommand {
+        pane_id: "pane-1".into(), command_id: route_id.clone(), text: "npm test".into(),
+    });
 
     // "已写入"回执 → 移动端
     send_json(
         &mut desktop,
         &DesktopToRelay::CommandReceipt {
             pane_id: "pane-1".into(),
-            command_id: "cmd-1".into(),
+            command_id: route_id,
             ok: true,
             reason: None,
         },
@@ -185,17 +192,15 @@ async fn answer_question_routes_and_rejects_when_offline() {
         },
     )
     .await;
-    assert_eq!(
-        recv_json::<RelayToDesktop>(&mut desktop).await,
-        Some(RelayToDesktop::AnswerQuestion {
-            pane_id: "pane-1".into(),
-            command_id: "ans-1".into(),
-            seq: 5,
-            question_id: "toolu_q1".into(),
-            question_index: 0,
-            option_index: 1,
-        })
-    );
+    let forwarded = recv_json::<RelayToDesktop>(&mut desktop).await.unwrap();
+    let route_id = match &forwarded {
+        RelayToDesktop::AnswerQuestion { command_id, .. } => command_id.clone(),
+        _ => panic!("expected answer question"),
+    };
+    assert_eq!(forwarded, RelayToDesktop::AnswerQuestion {
+        pane_id: "pane-1".into(), command_id: route_id, seq: 5,
+        question_id: "toolu_q1".into(), question_index: 0, option_index: 1,
+    });
 
     // 桌面端下线后作答即拒,回执走同一 CommandReceipt 通道
     desktop.close(None).await.unwrap();
@@ -280,17 +285,15 @@ async fn target_missing_failure_receipt_is_routed() {
         },
     )
     .await;
-    assert!(matches!(
-        recv_json::<RelayToDesktop>(&mut desktop).await,
-        Some(RelayToDesktop::MobileCommand { .. })
-    ));
+    let Some(RelayToDesktop::MobileCommand { command_id: route_id, .. }) =
+        recv_json::<RelayToDesktop>(&mut desktop).await else { panic!("expected mobile command"); };
 
     // 桌面端发现目标不存在 → 失败回执原样送达移动端
     send_json(
         &mut desktop,
         &DesktopToRelay::CommandReceipt {
             pane_id: "gone-pane".into(),
-            command_id: "cmd-2".into(),
+            command_id: route_id,
             ok: false,
             reason: Some(CommandFailReason::PaneNotFound),
         },
@@ -323,20 +326,20 @@ async fn start_ai_session_routes_to_desktop_and_receipt_returns() {
         },
     )
     .await;
-    assert_eq!(
-        recv_json::<RelayToDesktop>(&mut desktop).await,
-        Some(RelayToDesktop::StartAiSession {
-            request_id: "req-1".into(),
-            project_id: "p1".into(),
-            launcher_id: "l1".into(),
-        })
-    );
+    let forwarded = recv_json::<RelayToDesktop>(&mut desktop).await.unwrap();
+    let route_id = match &forwarded {
+        RelayToDesktop::StartAiSession { request_id, .. } => request_id.clone(),
+        _ => panic!("expected start session"),
+    };
+    assert_eq!(forwarded, RelayToDesktop::StartAiSession {
+        request_id: route_id.clone(), project_id: "p1".into(), launcher_id: "l1".into(),
+    });
 
     // "pane 已建、命令已写入"回执 → 移动端
     send_json(
         &mut desktop,
         &DesktopToRelay::StartSessionReceipt {
-            request_id: "req-1".into(),
+            request_id: route_id,
             ok: true,
             pane_id: Some("pane-7".into()),
             reason: None,
@@ -369,15 +372,13 @@ async fn start_ai_session_failure_receipt_is_routed() {
         },
     )
     .await;
-    assert!(matches!(
-        recv_json::<RelayToDesktop>(&mut desktop).await,
-        Some(RelayToDesktop::StartAiSession { .. })
-    ));
+    let Some(RelayToDesktop::StartAiSession { request_id: route_id, .. }) =
+        recv_json::<RelayToDesktop>(&mut desktop).await else { panic!("expected start session"); };
 
     send_json(
         &mut desktop,
         &DesktopToRelay::StartSessionReceipt {
-            request_id: "req-2".into(),
+            request_id: route_id,
             ok: false,
             pane_id: None,
             reason: Some(StartSessionFailReason::LauncherNotFound),

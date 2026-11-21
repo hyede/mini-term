@@ -333,6 +333,7 @@ fn save_launchers(state: &Entity<MobilePanel>, launchers: Vec<AiLauncher>, cx: &
 /// 先整块读出来再画:后面每个 `render_*` 都要 `&mut App`(建输入框 / 弹菜单),
 /// 而 `state.read(cx)` 的借用会一路活到语句末 —— 两者在同一个表达式里打架。
 struct Frame {
+    paired_devices: Vec<mt_relay::PairedMobile>,
     relay_url: String,
     status: Option<mt_relay::MobileRelayStatusPayload>,
     paired: Option<bool>,
@@ -356,6 +357,7 @@ fn read_frame(state: &Entity<MobilePanel>, cx: &App) -> Frame {
     let relay = store.mobile_relay();
     let status = store.mobile_relay_status().cloned();
     Frame {
+        paired_devices: panel.bridge.read(cx).manager().paired_devices(),
         relay_url: relay.relay_url,
         paired: status.as_ref().and_then(|s| s.paired),
         connected: status.as_ref().map(|s| s.status.as_str()) == Some("connected"),
@@ -533,6 +535,25 @@ fn render_body(
         );
     }
 
+    for (index, device) in frame.paired_devices.iter().enumerate() {
+        let mobile_id = device.mobile_id.clone();
+        qr_section = qr_section.child(
+            div().flex().items_center().justify_between().gap(px(8.0))
+                .child(device.name.clone())
+                .child(danger_ghost_button(("relay-revoke-mobile", index), t("mobileRelay", "modal.revokeMobile"))
+                    .on_click({
+                        let state = state.clone();
+                        move |_: &ClickEvent, window, cx| {
+                            let state = state.clone();
+                            let mobile_id = mobile_id.clone();
+                            Confirm::new(t("mobileRelay", "modal.revokeMobile"), t("mobileRelay", "modal.revokeConfirm"))
+                                .open(move |_, cx| {
+                                    let _ = state.read(cx).bridge.read(cx).manager().revoke_mobile(&mobile_id);
+                                }, window, cx);
+                        }
+                    })),
+        );
+    }
     body.child(qr_section.child(buttons)).into_any_element()
 }
 

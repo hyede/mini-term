@@ -12,9 +12,9 @@ use crate::Namespace;
 /// 命名空间总数（生成器对账用，测试断言防漂移）
 pub const NAMESPACE_COUNT: usize = 39;
 /// 中文条目总数
-pub const ZH_ENTRY_COUNT: usize = 1920;
+pub const ZH_ENTRY_COUNT: usize = 1922;
 /// 英文条目总数
-pub const EN_ENTRY_COUNT: usize = 1920;
+pub const EN_ENTRY_COUNT: usize = 1922;
 
 #[rustfmt::skip]
 static APP_ZH: &[(&str, &str)] = &[
@@ -2238,11 +2238,13 @@ static MOBILE_RELAY_ZH: &[(&str, &str)] = &[
     ("modal.paired", "已配对"),
     ("modal.pairedLabel", "配对状态"),
     ("modal.pairedUnknown", "未知（等待中转同步）"),
-    ("modal.qrHint", "用手机相机或浏览器扫码打开移动端页面，配对自动完成；手机没有扫码功能时，复制上方链接发到手机，用浏览器打开。二维码与链接一次性有效（10 分钟内），新设备配对会顶替旧设备。"),
+    ("modal.qrHint", "扫码或打开链接即可加入个人设备组。二维码与链接一次性有效（10 分钟）；授权可访问组内全部桌面端及以后加入的桌面端，不会顶替其他手机。"),
     ("modal.qrWaiting", "正在向中转请求配对码…"),
     ("modal.regenerateQr", "重新生成"),
-    ("modal.resetConfirm", "重置后当前已配对的移动端立即失效，需要重新扫码。确定重置吗？"),
+    ("modal.resetConfirm", "重置后此个人设备组内所有手机的授权立即失效，需要重新扫码。确定重置吗？"),
     ("modal.resetPairing", "重置配对"),
+    ("modal.revokeConfirm", "撤销后只有这部手机的授权失效，其他手机不受影响。确定撤销吗？"),
+    ("modal.revokeMobile", "撤销此设备"),
     ("modal.title", "移动端"),
     ("status.authFailed", "接入密钥不正确（配置问题，非网络问题），请核对中转的 MT_RELAY_DESKTOP_KEY 后重新保存"),
     ("status.connected", "已连接"),
@@ -2287,11 +2289,13 @@ static MOBILE_RELAY_EN: &[(&str, &str)] = &[
     ("modal.paired", "Paired"),
     ("modal.pairedLabel", "Pairing status"),
     ("modal.pairedUnknown", "Unknown (waiting for relay)"),
-    ("modal.qrHint", "Scan with your phone camera or browser to open the mobile page — pairing completes automatically. No scanner on your phone? Copy the link above, send it to your phone and open it in the browser. The QR code and link are single-use (valid for 10 minutes); pairing a new device replaces the old one."),
+    ("modal.qrHint", "Scan or open this single-use link within 10 minutes. Pairing grants access to every desktop in this personal device group, including desktops added later. Other phones stay paired."),
     ("modal.qrWaiting", "Requesting pairing code from relay…"),
     ("modal.regenerateQr", "Regenerate"),
-    ("modal.resetConfirm", "Resetting immediately invalidates the currently paired mobile device; it will need to re-scan. Reset now?"),
+    ("modal.resetConfirm", "Resetting revokes every phone in this personal device group. All phones must scan again. Reset now?"),
     ("modal.resetPairing", "Reset pairing"),
+    ("modal.revokeConfirm", "Only this phone will lose access; other phones are unaffected. Revoke it?"),
+    ("modal.revokeMobile", "Revoke device"),
     ("modal.title", "Mobile"),
     ("status.authFailed", "Access key rejected (a configuration problem, not a network one) — check MT_RELAY_DESKTOP_KEY on the relay and save again"),
     ("status.connected", "Connected"),

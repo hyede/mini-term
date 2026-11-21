@@ -1,4 +1,4 @@
-import { useRelayStore } from './relay';
+import { selectDesktop, useRelayStore } from './relay';
 import { useI18nStore, useT } from './i18n';
 import { SessionList } from './SessionList';
 import { MirrorView } from './MirrorView';
@@ -34,6 +34,9 @@ export function App() {
   const phase = useRelayStore((s) => s.phase);
   const rejectReason = useRelayStore((s) => s.rejectReason);
   const mirrorOpen = useRelayStore((s) => s.mirror !== null);
+  const devices = useRelayStore((s) => s.devices);
+  const selectedDesktopId = useRelayStore((s) => s.selectedDesktopId);
+  const switchingDisabled = useRelayStore((s) => !!s.mirror?.pendingCommandId || !!s.starting);
 
   let body;
   switch (phase) {
@@ -69,6 +72,19 @@ export function App() {
     <div className="app">
       <header className="app-header">
         <span className="app-name">{t('pair.appName')}</span>
+        {phase === 'connected' && devices.length > 0 && (
+          <label className="desktop-picker">
+            <span>{t('pair.desktop')}</span>
+            <select value={selectedDesktopId ?? ''} disabled={switchingDisabled}
+              onChange={(event) => selectDesktop(event.target.value)}>
+              {devices.map((device) => (
+                <option key={device.desktopId} value={device.desktopId}>
+                  {device.name}{device.online ? '' : ' · ' + t('pair.offline')}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <LanguageToggle />
       </header>
       <main className={`app-main ${phase === 'connected' ? 'list-mode' : ''}`}>{body}</main>

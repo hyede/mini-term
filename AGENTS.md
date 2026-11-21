@@ -197,7 +197,7 @@ hook 上报（`mt-ai::hook_server`）一旦启用即为权威，退出以 Sessio
 
 ### 移动端中转体系（`relay-server/` + `mobile/` + `mt-relay`）
 
-- `relay-server/protocol`：桌面端与中转共享的协议消息 crate（JSON over WebSocket，serde camelCase，版本号握手校验，当前 v2）；PWA 侧 TypeScript 类型在 `mobile/src/protocol.ts` 手写镜像，两侧字段必须同步维护
+- `relay-server/protocol`：桌面端与中转共享的协议消息 crate（JSON over WebSocket，serde camelCase，版本号握手校验，当前 v3（个人设备组 N×N 路由，设备与长期授权持久化，消息正文不落盘））；PWA 侧 TypeScript 类型在 `mobile/src/protocol.ts` 手写镜像，两侧字段必须同步维护
 - `relay-server/server`：axum 中转，只做转发不落盘；桌面端接入需携带 `MT_RELAY_DESKTOP_KEY`（未配置即拒绝一切桌面连接，fail-closed）
 - **AI 启动器**：桌面端配置的具名 `{名称, shell?, 命令}`，移动端只按 id 引用、看得到名字，命令文本从不经过移动端或中转（ADR 0002 的边界）
 - 部署见 `docs/deploy-relay.zh-CN.md`（英文版 `docs/deploy-relay.md`）

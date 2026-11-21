@@ -77,6 +77,7 @@ const SYNC_DEBOUNCE: Duration = Duration::from_millis(150);
 
 /// tokio 线程送上来的东西。**唯一**的跨线程口。
 pub enum RelaySignal {
+    DevicesChanged,
     /// 连接状态变化(原 `mobile-relay-status`)。
     Status(MobileRelayStatusPayload),
     /// 中转签发的一次性配对码(原 `mobile-relay-pairing-code`)。
@@ -206,6 +207,9 @@ struct EventsImpl {
 }
 
 impl RelayEvents for EventsImpl {
+    fn paired_devices_changed(&self) {
+        let _ = self.tx.unbounded_send(RelaySignal::DevicesChanged);
+    }
     fn status_changed(&self, status: MobileRelayStatusPayload) {
         let _ = self.tx.unbounded_send(RelaySignal::Status(status));
     }
@@ -780,6 +784,11 @@ impl RelayBridge {
 
     fn apply_signal(&mut self, signal: RelaySignal, window: &mut Window, cx: &mut Context<Self>) {
         match signal {
+            RelaySignal::DevicesChanged => {
+                if let Some(panel) = self.panel.as_ref().and_then(|panel| panel.upgrade()) {
+                    panel.update(cx, |_, cx| cx.notify());
+                }
+            }
             RelaySignal::Status(status) => {
                 self.store
                     .update(cx, |store, cx| store.set_mobile_relay_status(status, cx));
@@ -906,6 +915,10 @@ pub fn install(store: Entity<AppStore>, window: &mut Window, cx: &mut App) -> En
     });
     let events: Arc<dyn RelayEvents> = Arc::new(EventsImpl { tx });
     let manager = Arc::new(MobileRelayManager::new(host, events));
+    let identity_path = mt_config::active_data_dir().ok().map(|dir| dir.join("relay-device.json"));
+    if let Err(error) = manager.configure_device_identity(identity_path.as_deref()) {
+        eprintln!("[mobile-relay] persistent device identity unavailable: {error}");
+    }
 
     let entity = cx.new(|cx: &mut Context<RelayBridge>| {
         // 只订阅快照真正读的那几类变化(见 `StoreEvent::touches_relay_sync`)。

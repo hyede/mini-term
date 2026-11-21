@@ -1,5 +1,6 @@
 export const mirror = {
   zh: {
+    releaseControl: "释放控制权",
     back: "返回",
     backToList: "返回列表",
     loading: "加载中…",
@@ -43,6 +44,7 @@ export const mirror = {
     sending: "发送中…",
     receiptOk: "已写入桌面终端",
     receiptFail: {
+      controlBusy: "另一部手机正在控制此终端，请由它释放控制权或退出会话",
       desktopOffline: "发送失败：桌面端离线",
       paneNotFound: "发送失败：目标 pane 已关闭或 AI 会话已结束",
       writeFailed: "发送失败：终端写入失败",
@@ -51,6 +53,7 @@ export const mirror = {
     offlineCannotSend: "桌面端离线，暂时无法发送指令",
   },
   en: {
+    releaseControl: "Release control",
     back: "Back",
     backToList: "Back to list",
     loading: "Loading…",
@@ -95,6 +98,7 @@ export const mirror = {
     receiptOk: "Written to desktop terminal",
     receiptFail: {
       desktopOffline: "Failed: desktop is offline",
+      controlBusy: "Another phone controls this terminal. It must release control or leave the session.",
       paneNotFound: "Failed: target pane closed or AI session ended",
       writeFailed: "Failed: terminal write error",
       questionNotPending: "Failed: this question was already handled or expired",

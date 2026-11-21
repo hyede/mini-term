@@ -4,7 +4,7 @@
  * 两侧字段增删必须同步维护。
  */
 
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 // ── 移动端 → 中转 ──
 
@@ -15,6 +15,31 @@ export interface MobileHello {
   pairingCode?: string;
   /** 重连:长期凭证 */
   credential?: string;
+  desktopId?: string;
+  deviceName?: string;
+  multiDevice?: boolean;
+}
+
+export interface DesktopDevice {
+  desktopId: string;
+  name: string;
+  online: boolean;
+}
+
+export interface MobileDesktopList {
+  type: 'desktopList';
+  devices: DesktopDevice[];
+  selectedDesktopId: string | null;
+}
+
+export interface MobileSelectDesktop {
+  type: 'selectDesktop';
+  desktopId: string;
+}
+
+export interface MobileReleaseControl {
+  type: 'releaseControl';
+  paneId: string;
 }
 
 /** 订阅某 pane 的对话镜像(进入镜像页) */
@@ -79,6 +104,8 @@ export interface MobileAnswerQuestion {
 }
 
 export type MobileToRelay =
+  | MobileSelectDesktop
+  | MobileReleaseControl
   | MobileHello
   | MobileSubscribePane
   | MobileUnsubscribePane
@@ -239,6 +266,7 @@ export interface MobilePaneClosed {
 }
 
 export type CommandFailReason =
+  | 'controlBusy'
   | 'desktopOffline'
   | 'paneNotFound'
   | 'writeFailed'
@@ -270,6 +298,8 @@ export interface MobileStartSessionReceipt {
 }
 
 export type RelayToMobile =
+  | { type: 'controlReleased'; paneId: string }
+  | MobileDesktopList
   | MobileHelloAck
   | MobileHelloReject
   | MobileRevoked

@@ -68,6 +68,9 @@ async fn desktop_handshake(addr: SocketAddr) -> WsClient {
     send_json(
         &mut ws,
         &DesktopToRelay::Hello {
+            desktop_id: "desktop".into(),
+            desktop_name: "Desktop".into(),
+            device_key: "test-device-key".into(),
             protocol_version: PROTOCOL_VERSION,
             desktop_key: DESKTOP_KEY.into(),
         },
@@ -95,6 +98,9 @@ async fn obtain_credential(addr: SocketAddr, desktop: &mut WsClient) -> String {
     send_json(
         &mut mobile,
         &MobileToRelay::Hello {
+            desktop_id: None,
+            device_name: "Mobile".into(),
+            multi_device: false,
             protocol_version: PROTOCOL_VERSION,
             pairing_code: Some(code),
             credential: None,
@@ -123,6 +129,9 @@ async fn mobile_connect(addr: SocketAddr, credential: &str) -> WsClient {
     send_json(
         &mut ws,
         &MobileToRelay::Hello {
+            desktop_id: None,
+            device_name: "Mobile".into(),
+            multi_device: false,
             protocol_version: PROTOCOL_VERSION,
             pairing_code: None,
             credential: Some(credential.into()),

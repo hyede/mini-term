@@ -323,6 +323,8 @@ fn find_mobile_cmd(
 
 /// 当前连接会话的取消句柄;整个 manager 由上层用 `Arc` 长期持有。
 pub struct MobileRelayManager {
+    identity: Mutex<Option<crate::device::DeviceIdentity>>,
+    paired_devices: Mutex<Vec<mt_relay_protocol::PairedMobile>>,
     cancel: Mutex<Option<watch::Sender<bool>>>,
     status: Mutex<MobileRelayStatusPayload>,
     /// 已连接会话的出站消息通道(请求配对码/重置配对经此送往中转)
@@ -359,6 +361,8 @@ impl MobileRelayManager {
     /// [`apply`]: MobileRelayManager::apply
     pub fn new(host: Arc<dyn RelayHost>, events: Arc<dyn RelayEvents>) -> Self {
         Self {
+            identity: Mutex::new(Some(crate::device::DeviceIdentity::new())),
+            paired_devices: Mutex::new(Vec::new()),
             cancel: Mutex::new(None),
             status: Mutex::new(MobileRelayStatusPayload::simple("disconnected")),
             outbound: Mutex::new(None),
@@ -447,6 +451,23 @@ impl MobileRelayManager {
     /// 请求中转签发一次性配对码;结果经 [`RelayEvents::pairing_code`] 推回。
     pub fn request_pairing_code(&self) -> Result<(), String> {
         self.send(DesktopToRelay::RequestPairingCode)
+    }
+
+    pub fn configure_device_identity(&self, path: Option<&std::path::Path>) -> Result<(), String> {
+        let identity = path.ok_or_else(|| "relay device data directory unavailable".to_string())
+            .and_then(|path| crate::device::DeviceIdentity::load(path).map_err(|error| error.to_string()));
+        match identity {
+            Ok(identity) => { *self.identity.lock() = Some(identity); Ok(()) }
+            Err(error) => { *self.identity.lock() = None; Err(error) }
+        }
+    }
+
+    pub fn paired_devices(&self) -> Vec<mt_relay_protocol::PairedMobile> {
+        self.paired_devices.lock().clone()
+    }
+
+    pub fn revoke_mobile(&self, mobile_id: &str) -> Result<(), String> {
+        self.send(DesktopToRelay::RevokeMobile { mobile_id: mobile_id.into() })
     }
 
     /// 重置配对:吊销移动端全部凭证;结果经状态回调的 `paired` 字段推回。
@@ -837,7 +858,7 @@ impl MobileRelayManager {
     }
 
     /// 分页取数:从订阅的消息缓存里取 seq < before_seq 的最近一页并回发。
-    fn send_mirror_history(&self, pane_id: &str, before_seq: u64) {
+    fn send_mirror_history(&self, pane_id: &str, before_seq: u64, request_id: Option<String>) {
         let slice = {
             let subs = self.mirror_subs.lock();
             let Some(sub) = subs.get(pane_id) else { return };
@@ -846,10 +867,22 @@ impl MobileRelayManager {
         };
         let (messages, has_more) = slice;
         let _ = self.send(DesktopToRelay::MirrorHistory {
+            request_id,
             pane_id: pane_id.into(),
             messages,
             has_more,
         });
+    }
+
+    fn send_current_mirror(&self, pane_id: &str) {
+        let slice = {
+            let subs = self.mirror_subs.lock();
+            let Some(sub) = subs.get(pane_id) else { return; };
+            let messages = sub.messages.lock();
+            history_slice(&messages, None, MIRROR_PAGE_SIZE)
+        };
+        let (messages, has_more) = slice;
+        let _ = self.send(DesktopToRelay::MirrorSnapshot { pane_id: pane_id.into(), messages, has_more });
     }
 
     /// 发送当前全量快照(握手成功后 / 收到中转的快照请求时 / 启动器配置变化时)。
@@ -1030,10 +1063,19 @@ async fn connect_once(
         _ = cancel_rx.changed() => return Attempt::Cancelled,
     };
 
+    let Some(identity) = manager.identity.lock().clone() else {
+        eprintln!("[mobile-relay] device identity unavailable; connection refused locally");
+        return Attempt::Rejected(DesktopRejectReason::InvalidKey);
+    };
     let hello = DesktopToRelay::Hello {
+        desktop_id: identity.desktop_id,
+        desktop_name: identity.desktop_name,
+        device_key: identity.device_key,
         protocol_version: PROTOCOL_VERSION,
         desktop_key: desktop_key.to_string(),
     };
+    let mut hello = serde_json::to_value(hello).unwrap();
+    hello["manageDevices"] = true.into();
     if ws
         .send(Message::Text(
             serde_json::to_string(&hello).unwrap().into(),
@@ -1117,15 +1159,21 @@ fn handle_relay_message(manager: &Arc<MobileRelayManager>, text: &str) {
     match serde_json::from_str::<RelayToDesktop>(text) {
         Ok(RelayToDesktop::PairingCode { code }) => manager.events.pairing_code(code),
         Ok(RelayToDesktop::PairingUpdate { paired }) => manager.set_paired(paired),
+        Ok(RelayToDesktop::PairedDevices { devices }) => {
+            *manager.paired_devices.lock() = devices;
+            manager.events.paired_devices_changed();
+        }
         // 移动端上线,回发最新结构快照(中转不缓存)
         Ok(RelayToDesktop::SessionsSnapshotRequest) => manager.send_snapshot(),
         // 对话镜像:订阅/退订/分页
         Ok(RelayToDesktop::SubscribePane { pane_id }) => manager.subscribe_pane(pane_id),
+        Ok(RelayToDesktop::MirrorSnapshotRequest { pane_id }) => manager.send_current_mirror(&pane_id),
         Ok(RelayToDesktop::UnsubscribePane { pane_id }) => manager.unsubscribe_pane(&pane_id),
         Ok(RelayToDesktop::RequestMirrorHistory {
             pane_id,
             before_seq,
-        }) => manager.send_mirror_history(&pane_id, before_seq),
+            request_id,
+        }) => manager.send_mirror_history(&pane_id, before_seq, request_id),
         // 移动端指令:按到达顺序写穿目标 pane 的 PTY(正文与回车分两次写),写完回执
         Ok(RelayToDesktop::MobileCommand {
             pane_id,

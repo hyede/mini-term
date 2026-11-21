@@ -68,6 +68,9 @@ async fn paired_pair(addr: SocketAddr) -> (WsClient, WsClient) {
     send_json(
         &mut desktop,
         &DesktopToRelay::Hello {
+            desktop_id: "desktop".into(),
+            desktop_name: "Desktop".into(),
+            device_key: "test-device-key".into(),
             protocol_version: PROTOCOL_VERSION,
             desktop_key: DESKTOP_KEY.into(),
         },
@@ -92,6 +95,9 @@ async fn paired_pair(addr: SocketAddr) -> (WsClient, WsClient) {
     send_json(
         &mut mobile,
         &MobileToRelay::Hello {
+            desktop_id: None,
+            device_name: "Mobile".into(),
+            multi_device: false,
             protocol_version: PROTOCOL_VERSION,
             pairing_code: Some(code),
             credential: None,
@@ -197,6 +203,7 @@ async fn subscribe_routes_mirror_flow_end_to_end() {
     assert_eq!(
         recv_json::<RelayToDesktop>(&mut desktop).await,
         Some(RelayToDesktop::RequestMirrorHistory {
+            request_id: None,
             pane_id: "pane-1".into(),
             before_seq: 1,
         })

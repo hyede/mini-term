@@ -83,6 +83,7 @@ pub trait RelayHost: Send + Sync + 'static {
 
 /// 中转体系推给桌面端的状态与动作。
 pub trait RelayEvents: Send + Sync + 'static {
+    fn paired_devices_changed(&self) {}
     /// 连接状态变化(原 `mobile-relay-status` 事件),设置页「移动端」区域展示。
     fn status_changed(&self, status: MobileRelayStatusPayload);
 

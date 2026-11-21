@@ -4,7 +4,7 @@
 //! 用真实协议帧从边界驱动;`main.rs` 只负责读环境变量并绑定端口。
 //!
 //! 中转纪律:消息体仅内存转发不落盘;日志只记元数据(连接、鉴权结果),不记消息内容。
-//! 配对状态(一次性配对码、移动端长期凭证)同样仅存内存——中转重启后需重新扫码配对。
+//! 设备和长期授权可持久化;一次性配对码与连接/订阅/待回执路由只存内存。
 //!
 //! # 资源上限(公网服务,未鉴权的连接也要先占资源)
 //!
@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use axum::extract::connect_info::ConnectInfo;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -28,10 +28,7 @@ use axum::http::{HeaderMap, HeaderName, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get};
 use axum::{Extension, Router};
-use mt_relay_protocol::{
-    CommandFailReason, DesktopRejectReason, DesktopToRelay, MobileRejectReason, MobileToRelay,
-    RelayToDesktop, RelayToMobile, StartSessionFailReason, PROTOCOL_VERSION,
-};
+use mt_relay_protocol::DesktopRejectReason;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, Notify};
 
@@ -211,49 +208,12 @@ impl ConnSlot {
 ///
 /// 写本身也要和溢出赛跑:对端彻底卡死(TCP 窗口为 0)时 `send` 永远不返回,
 /// 只在外层 select 里等溢出信号就永远等不到断开的那一刻。返回 `false` = 该断开了。
-async fn send_or_overflow(
-    socket: &mut WebSocket,
-    frame: Message,
-    overflow: &Notify,
-    side: &str,
-    generation: u64,
-) -> bool {
-    tokio::select! {
-        sent = socket.send(frame) => sent.is_ok(),
-        _ = overflow.notified() => {
-            log_overflow(side, generation);
-            false
-        }
-    }
-}
 
-fn log_overflow(side: &str, generation: u64) {
-    eprintln!(
-        "[relay] {side} outbound queue full (gen {generation}): slow consumer, disconnecting"
-    );
-}
-
-struct PairingCode {
-    code: String,
-    issued_at: Instant,
-}
-
-#[derive(Default)]
-struct Inner {
-    desktop: Option<ConnSlot>,
-    mobile: Option<ConnSlot>,
-    /// 待兑换的一次性配对码(签发新码/兑换成功/重置配对时作废)
-    pairing_code: Option<PairingCode>,
-    /// 当前有效的移动端长期凭证(1×1:新配对生效即顶替)
-    credential: Option<String>,
-    /// 移动端当前订阅的镜像 pane 集合;未订阅 pane 的镜像消息在路由层丢弃。
-    /// 只存 pane id(元数据),不缓存镜像内容。
-    subscriptions: std::collections::HashSet<String>,
-}
+mod devices;
 
 #[derive(Clone)]
 pub struct RelayState {
-    inner: Arc<Mutex<Inner>>,
+    devices: Arc<Mutex<devices::Registry>>,
     generation_counter: Arc<AtomicU64>,
     code_ttl: Duration,
     /// 桌面端共享密钥(部署方经 `MT_RELAY_DESKTOP_KEY` 配置)。
@@ -266,6 +226,11 @@ pub struct RelayState {
 }
 
 impl RelayState {
+    pub fn with_state_file(self, path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
+        self.devices.lock().unwrap().load(path.as_ref())?;
+        Ok(self)
+    }
+
     /// 未配置桌面端密钥的实例:任何桌面连接都会被拒。
     /// 生产入口必须用 [`RelayState::with_desktop_key`] 传入实际密钥。
     pub fn new() -> Self {
@@ -275,7 +240,7 @@ impl RelayState {
     /// 测试用:自定义配对码有效期。
     pub fn with_code_ttl(code_ttl: Duration) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(Inner::default())),
+            devices: Arc::new(Mutex::new(devices::Registry::default())),
             generation_counter: Arc::new(AtomicU64::new(0)),
             code_ttl,
             desktop_key: None,
@@ -416,658 +381,34 @@ fn random_id() -> String {
     uuid::Uuid::new_v4().simple().to_string()
 }
 
-// ─── 桌面端连接 ───
-
-/// `peer` 只有经 `into_make_service_with_connect_info` 起服务时才有(`main.rs`);
-/// 进程内测试直接 serve `app()`,拿不到时按头部 / 共用桶计数。
 async fn desktop_ws_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<RelayState>,
-    headers: HeaderMap,
+    ws: WebSocketUpgrade, State(state): State<RelayState>, headers: HeaderMap,
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
 ) -> Response {
     let permit = match state.admit_request("desktop", &headers, peer) {
         Ok(permit) => permit,
         Err(reason) => return reason.into_response(),
     };
-    ws.max_message_size(DESKTOP_MAX_MESSAGE_BYTES)
-        .max_frame_size(DESKTOP_MAX_MESSAGE_BYTES)
+    ws.max_message_size(DESKTOP_MAX_MESSAGE_BYTES).max_frame_size(DESKTOP_MAX_MESSAGE_BYTES)
         .on_upgrade(move |socket| async move {
-            // 名额随连接任务活到连接结束
             let _permit = permit;
-            handle_desktop(socket, state).await;
+            devices::desktop(socket, state).await;
         })
 }
 
-/// 桌面端连接生命周期:握手(版本 → 密钥)→ 注册(顶替旧连接)→ 消息循环 → 注销。
-async fn handle_desktop(mut socket: WebSocket, state: RelayState) {
-    // ── 握手:第一条消息必须是 hello,且版本匹配、密钥正确 ──
-    let first = tokio::time::timeout(HANDSHAKE_TIMEOUT, socket.recv()).await;
-    let (actual_version, desktop_key) = match first {
-        Ok(Some(Ok(Message::Text(text)))) => match serde_json::from_str::<DesktopToRelay>(&text) {
-            Ok(DesktopToRelay::Hello {
-                protocol_version,
-                desktop_key,
-            }) => (protocol_version, desktop_key),
-            _ => {
-                eprintln!("[relay] desktop handshake failed: first message not hello");
-                let _ = socket.send(Message::Close(None)).await;
-                return;
-            }
-        },
-        _ => {
-            eprintln!("[relay] desktop handshake failed: timeout or non-text frame");
-            let _ = socket.send(Message::Close(None)).await;
-            return;
-        }
-    };
-
-    // 校验顺序:版本 → 密钥。版本对不上时密钥字段的语义本就不可信。
-    if actual_version != PROTOCOL_VERSION {
-        eprintln!(
-            "[relay] desktop rejected: protocol version {actual_version} != {PROTOCOL_VERSION}"
-        );
-        let reject = RelayToDesktop::HelloReject {
-            reason: DesktopRejectReason::VersionMismatch,
-            expected_version: Some(PROTOCOL_VERSION),
-            actual_version: Some(actual_version),
-        };
-        let _ = socket.send(to_text(&reject)).await;
-        let _ = socket.send(Message::Close(None)).await;
-        return;
-    }
-
-    // 鉴权失败只记原因,绝不记密钥本身(中转日志纪律)
-    if let Err(reason) = state.authenticate_desktop(&desktop_key) {
-        eprintln!("[relay] desktop rejected: {reason:?}");
-        let reject = RelayToDesktop::HelloReject {
-            reason,
-            expected_version: None,
-            actual_version: None,
-        };
-        let _ = socket.send(to_text(&reject)).await;
-        let _ = socket.send(Message::Close(None)).await;
-        return;
-    }
-
-    // ── 注册:顶替旧桌面连接(两台桌面端互踢属配置错误,v1 不做仲裁) ──
-    let generation = state.next_generation();
-    let (tx, mut rx) = state.outbound_channel();
-    let overflow = Arc::new(Notify::new());
-    let paired = {
-        let mut inner = state.inner.lock().unwrap();
-        let replaced = inner.desktop.take();
-        if let Some(old) = replaced.as_ref() {
-            eprintln!("[relay] desktop connection replaced (gen {})", old.generation);
-            old.send(Message::Close(None));
-        }
-        inner.desktop = Some(ConnSlot {
-            generation,
-            tx,
-            overflow: overflow.clone(),
-        });
-        // presence:桌面端从离线转为在线时通知移动端(顶替不算状态变化)
-        if replaced.is_none() {
-            if let Some(mobile) = inner.mobile.as_ref() {
-                mobile.send(to_text(&RelayToMobile::Presence {
-                    desktop_online: true,
-                }));
-            }
-        }
-        inner.credential.is_some()
-    };
-    eprintln!("[relay] desktop connected (gen {generation})");
-
-    // 握手成功:ack + 当前配对状态
-    let ack = RelayToDesktop::HelloAck {
-        protocol_version: PROTOCOL_VERSION,
-    };
-    if socket.send(to_text(&ack)).await.is_err()
-        || socket
-            .send(to_text(&RelayToDesktop::PairingUpdate { paired }))
-            .await
-            .is_err()
-    {
-        deregister_desktop(&state, generation);
-        return;
-    }
-
-    // ── 消息循环 ──
-    loop {
-        tokio::select! {
-            // 出站队列溢出(慢消费者):断开,注销后由桌面端重连自愈
-            _ = overflow.notified() => {
-                log_overflow("desktop", generation);
-                break;
-            }
-            out = rx.recv() => match out {
-                // 槽位持有者(顶替我们的新连接/未来的路由方)让我们发帧;Close 帧发完即退出
-                Some(frame) => {
-                    let is_close = matches!(frame, Message::Close(_));
-                    let sent =
-                        send_or_overflow(&mut socket, frame, &overflow, "desktop", generation)
-                            .await;
-                    if is_close {
-                        eprintln!("[relay] desktop disconnected (gen {generation}, replaced)");
-                        return; // 被顶替:槽已属于新连接,不注销
-                    }
-                    if !sent {
-                        break;
-                    }
-                }
-                None => break,
-            },
-            msg = socket.recv() => match msg {
-                Some(Ok(Message::Text(text))) => {
-                    match serde_json::from_str::<DesktopToRelay>(&text) {
-                        Ok(msg) => handle_desktop_message(&state, msg),
-                        Err(_) => eprintln!("[relay] desktop sent unparseable message (ignored)"),
-                    }
-                }
-                Some(Ok(Message::Close(_))) | None => break,
-                Some(Ok(_)) => {}
-                Some(Err(_)) => break,
-            },
-        }
-    }
-
-    deregister_desktop(&state, generation);
-    eprintln!("[relay] desktop disconnected (gen {generation})");
-}
-
-/// 处理握手后的桌面端业务消息。
-fn handle_desktop_message(state: &RelayState, msg: DesktopToRelay) {
-    match msg {
-        DesktopToRelay::Hello { .. } => {} // 重复 hello 忽略
-        // 结构快照/增量:只转发给在线移动端,中转不缓存不解析内容
-        DesktopToRelay::SessionsSnapshot {
-            projects,
-            launchers,
-        } => {
-            let inner = state.inner.lock().unwrap();
-            if let Some(mobile) = inner.mobile.as_ref() {
-                mobile.send(to_text(&RelayToMobile::SessionsSnapshot {
-                    projects,
-                    launchers,
-                }));
-            }
-        }
-        DesktopToRelay::SessionsDelta {
-            upserts,
-            removed_project_ids,
-        } => {
-            let inner = state.inner.lock().unwrap();
-            if let Some(mobile) = inner.mobile.as_ref() {
-                mobile.send(to_text(&RelayToMobile::SessionsDelta {
-                    upserts,
-                    removed_project_ids,
-                }));
-            }
-        }
-        // 镜像消息:仅路由给已订阅该 pane 的移动端,未订阅一律丢弃
-        DesktopToRelay::MirrorSnapshot {
-            pane_id,
-            messages,
-            has_more,
-        } => {
-            let inner = state.inner.lock().unwrap();
-            if inner.subscriptions.contains(&pane_id) {
-                if let Some(mobile) = inner.mobile.as_ref() {
-                    mobile.send(to_text(&RelayToMobile::MirrorSnapshot {
-                        pane_id,
-                        messages,
-                        has_more,
-                    }));
-                }
-            }
-        }
-        DesktopToRelay::MirrorAppend { pane_id, messages } => {
-            let inner = state.inner.lock().unwrap();
-            if inner.subscriptions.contains(&pane_id) {
-                if let Some(mobile) = inner.mobile.as_ref() {
-                    mobile.send(to_text(&RelayToMobile::MirrorAppend { pane_id, messages }));
-                }
-            }
-        }
-        DesktopToRelay::MirrorHistory {
-            pane_id,
-            messages,
-            has_more,
-        } => {
-            let inner = state.inner.lock().unwrap();
-            if inner.subscriptions.contains(&pane_id) {
-                if let Some(mobile) = inner.mobile.as_ref() {
-                    mobile.send(to_text(&RelayToMobile::MirrorHistory {
-                        pane_id,
-                        messages,
-                        has_more,
-                    }));
-                }
-            }
-        }
-        // pane 关闭:转发并清掉订阅(后续同 pane 消息不再路由)
-        DesktopToRelay::PaneClosed { pane_id } => {
-            let mut inner = state.inner.lock().unwrap();
-            if inner.subscriptions.remove(&pane_id) {
-                if let Some(mobile) = inner.mobile.as_ref() {
-                    mobile.send(to_text(&RelayToMobile::PaneClosed { pane_id }));
-                }
-            }
-        }
-        // 指令回执:原样转发(以 command_id 关联,不依赖订阅状态)
-        DesktopToRelay::CommandReceipt {
-            pane_id,
-            command_id,
-            ok,
-            reason,
-        } => {
-            let inner = state.inner.lock().unwrap();
-            if let Some(mobile) = inner.mobile.as_ref() {
-                mobile.send(to_text(&RelayToMobile::CommandReceipt {
-                    pane_id,
-                    command_id,
-                    ok,
-                    reason,
-                }));
-            }
-        }
-        // 发起会话回执:原样转发(以 request_id 关联)
-        DesktopToRelay::StartSessionReceipt {
-            request_id,
-            ok,
-            pane_id,
-            reason,
-        } => {
-            let inner = state.inner.lock().unwrap();
-            if let Some(mobile) = inner.mobile.as_ref() {
-                mobile.send(to_text(&RelayToMobile::StartSessionReceipt {
-                    request_id,
-                    ok,
-                    pane_id,
-                    reason,
-                }));
-            }
-        }
-        DesktopToRelay::RequestPairingCode => {
-            let code = random_id();
-            let mut inner = state.inner.lock().unwrap();
-            inner.pairing_code = Some(PairingCode {
-                code: code.clone(),
-                issued_at: Instant::now(),
-            });
-            eprintln!("[relay] pairing code issued");
-            if let Some(desktop) = inner.desktop.as_ref() {
-                desktop.send(to_text(&RelayToDesktop::PairingCode { code }));
-            }
-        }
-        DesktopToRelay::ResetPairing => {
-            let mut inner = state.inner.lock().unwrap();
-            inner.pairing_code = None;
-            inner.credential = None;
-            if let Some(mobile) = inner.mobile.take() {
-                mobile.send(to_text(&RelayToMobile::Revoked));
-                mobile.send(Message::Close(None));
-                drop_subscriptions(&mut inner);
-            }
-            eprintln!("[relay] pairing reset: credential revoked");
-            if let Some(desktop) = inner.desktop.as_ref() {
-                desktop.send(to_text(&RelayToDesktop::PairingUpdate { paired: false }));
-            }
-        }
-    }
-}
-
-fn deregister_desktop(state: &RelayState, generation: u64) {
-    let mut inner = state.inner.lock().unwrap();
-    if inner
-        .desktop
-        .as_ref()
-        .is_some_and(|s| s.generation == generation)
-    {
-        inner.desktop = None;
-        // presence:桌面端离线,立即推给在线移动端(离线横幅)
-        if let Some(mobile) = inner.mobile.as_ref() {
-            mobile.send(to_text(&RelayToMobile::Presence {
-                desktop_online: false,
-            }));
-        }
-    }
-}
-
-// ─── 移动端连接 ───
-
 async fn mobile_ws_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<RelayState>,
-    headers: HeaderMap,
+    ws: WebSocketUpgrade, State(state): State<RelayState>, headers: HeaderMap,
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
 ) -> Response {
     let permit = match state.admit_request("mobile", &headers, peer) {
         Ok(permit) => permit,
         Err(reason) => return reason.into_response(),
     };
-    ws.max_message_size(MOBILE_MAX_MESSAGE_BYTES)
-        .max_frame_size(MOBILE_MAX_MESSAGE_BYTES)
+    ws.max_message_size(MOBILE_MAX_MESSAGE_BYTES).max_frame_size(MOBILE_MAX_MESSAGE_BYTES)
         .on_upgrade(move |socket| async move {
             let _permit = permit;
-            handle_mobile(socket, state).await;
+            devices::mobile(socket, state).await;
         })
-}
-
-/// 移动端握手的鉴权结果。
-enum MobileAuth {
-    /// 配对码兑换成功,携带新签发凭证
-    NewlyPaired(String),
-    /// 凭证重连成功
-    Resumed,
-    Rejected(MobileRejectReason),
-}
-
-/// 校验移动端握手并落配对状态(锁内完成,不做 IO)。
-fn authenticate_mobile(
-    state: &RelayState,
-    pairing_code: Option<String>,
-    credential: Option<String>,
-) -> MobileAuth {
-    let mut inner = state.inner.lock().unwrap();
-    if let Some(code) = pairing_code {
-        let valid = inner.pairing_code.as_ref().is_some_and(|active| {
-            active.code == code && active.issued_at.elapsed() <= state.code_ttl
-        });
-        if !valid {
-            return MobileAuth::Rejected(MobileRejectReason::InvalidPairingCode);
-        }
-        // 兑换成功:配对码一次性作废;新凭证顶替旧凭证(1×1),踢掉旧移动端连接
-        inner.pairing_code = None;
-        let new_credential = random_id();
-        inner.credential = Some(new_credential.clone());
-        if let Some(old) = inner.mobile.take() {
-            old.send(to_text(&RelayToMobile::Revoked));
-            old.send(Message::Close(None));
-            drop_subscriptions(&mut inner);
-        }
-        if let Some(desktop) = inner.desktop.as_ref() {
-            desktop.send(to_text(&RelayToDesktop::PairingUpdate { paired: true }));
-        }
-        MobileAuth::NewlyPaired(new_credential)
-    } else if let Some(cred) = credential {
-        if inner.credential.as_deref() == Some(cred.as_str()) {
-            MobileAuth::Resumed
-        } else {
-            MobileAuth::Rejected(MobileRejectReason::InvalidCredential)
-        }
-    } else {
-        MobileAuth::Rejected(MobileRejectReason::MissingAuth)
-    }
-}
-
-/// 移动端连接生命周期:握手(配对码兑换/凭证校验)→ 注册 → 消息循环 → 注销。
-async fn handle_mobile(mut socket: WebSocket, state: RelayState) {
-    let first = tokio::time::timeout(HANDSHAKE_TIMEOUT, socket.recv()).await;
-    let (version, pairing_code, credential) = match first {
-        Ok(Some(Ok(Message::Text(text)))) => match serde_json::from_str::<MobileToRelay>(&text) {
-            Ok(MobileToRelay::Hello {
-                protocol_version,
-                pairing_code,
-                credential,
-            }) => (protocol_version, pairing_code, credential),
-            _ => {
-                eprintln!("[relay] mobile handshake failed: first message not hello");
-                let _ = socket.send(Message::Close(None)).await;
-                return;
-            }
-        },
-        _ => {
-            eprintln!("[relay] mobile handshake failed: timeout or non-text frame");
-            let _ = socket.send(Message::Close(None)).await;
-            return;
-        }
-    };
-
-    if version != PROTOCOL_VERSION {
-        eprintln!("[relay] mobile rejected: protocol version {version} != {PROTOCOL_VERSION}");
-        let _ = socket
-            .send(to_text(&RelayToMobile::HelloReject {
-                reason: MobileRejectReason::VersionMismatch,
-            }))
-            .await;
-        let _ = socket.send(Message::Close(None)).await;
-        return;
-    }
-
-    let issued_credential = match authenticate_mobile(&state, pairing_code, credential) {
-        MobileAuth::Rejected(reason) => {
-            eprintln!("[relay] mobile rejected: {reason:?}");
-            let _ = socket
-                .send(to_text(&RelayToMobile::HelloReject { reason }))
-                .await;
-            let _ = socket.send(Message::Close(None)).await;
-            return;
-        }
-        MobileAuth::NewlyPaired(cred) => Some(cred),
-        MobileAuth::Resumed => None,
-    };
-
-    // ── 注册:同凭证重连顶替旧连接 ──
-    let generation = state.next_generation();
-    let (tx, mut rx) = state.outbound_channel();
-    let overflow = Arc::new(Notify::new());
-    let desktop_online = {
-        let mut inner = state.inner.lock().unwrap();
-        if let Some(old) = inner.mobile.take() {
-            eprintln!("[relay] mobile connection replaced (gen {})", old.generation);
-            old.send(Message::Close(None));
-            // 旧连接的订阅对新连接无意义,清掉并通知桌面端停止镜像推送
-            drop_subscriptions(&mut inner);
-        }
-        inner.mobile = Some(ConnSlot {
-            generation,
-            tx,
-            overflow: overflow.clone(),
-        });
-        inner.desktop.is_some()
-    };
-    eprintln!("[relay] mobile connected (gen {generation})");
-
-    // 握手成功:ack + 当前桌面端 presence;桌面端在线则请它回发最新结构快照
-    let ack = RelayToMobile::HelloAck {
-        protocol_version: PROTOCOL_VERSION,
-        credential: issued_credential,
-    };
-    if socket.send(to_text(&ack)).await.is_err()
-        || socket
-            .send(to_text(&RelayToMobile::Presence { desktop_online }))
-            .await
-            .is_err()
-    {
-        deregister_mobile(&state, generation);
-        return;
-    }
-    if desktop_online {
-        let inner = state.inner.lock().unwrap();
-        if let Some(desktop) = inner.desktop.as_ref() {
-            desktop.send(to_text(&RelayToDesktop::SessionsSnapshotRequest));
-        }
-    }
-
-    // ── 消息循环 ──
-    loop {
-        tokio::select! {
-            // 出站队列溢出(弱网 / 后台挂起的手机):断开,重连后握手 + 快照自愈
-            _ = overflow.notified() => {
-                log_overflow("mobile", generation);
-                break;
-            }
-            out = rx.recv() => match out {
-                Some(frame) => {
-                    let is_close = matches!(frame, Message::Close(_));
-                    let sent =
-                        send_or_overflow(&mut socket, frame, &overflow, "mobile", generation)
-                            .await;
-                    if is_close {
-                        eprintln!("[relay] mobile disconnected (gen {generation}, kicked)");
-                        return; // 被吊销/顶替:槽位已易主或已清空,不注销
-                    }
-                    if !sent {
-                        break;
-                    }
-                }
-                None => break,
-            },
-            msg = socket.recv() => match msg {
-                Some(Ok(Message::Text(text))) => {
-                    match serde_json::from_str::<MobileToRelay>(&text) {
-                        Ok(msg) => handle_mobile_message(&state, msg),
-                        Err(_) => eprintln!("[relay] mobile sent unparseable message (ignored)"),
-                    }
-                }
-                Some(Ok(Message::Close(_))) | None => break,
-                Some(Ok(_)) => {}
-                Some(Err(_)) => break,
-            },
-        }
-    }
-
-    deregister_mobile(&state, generation);
-    eprintln!("[relay] mobile disconnected (gen {generation})");
-}
-
-/// 处理握手后的移动端业务消息:订阅登记 + 转发给桌面端。
-fn handle_mobile_message(state: &RelayState, msg: MobileToRelay) {
-    let mut inner = state.inner.lock().unwrap();
-    let forward = match msg {
-        MobileToRelay::Hello { .. } => None, // 重复 hello 忽略
-        MobileToRelay::SubscribePane { pane_id } => {
-            inner.subscriptions.insert(pane_id.clone());
-            Some(RelayToDesktop::SubscribePane { pane_id })
-        }
-        MobileToRelay::UnsubscribePane { pane_id } => {
-            inner.subscriptions.remove(&pane_id);
-            Some(RelayToDesktop::UnsubscribePane { pane_id })
-        }
-        // 先 let 再 then_some:「解构模式 => 方法链」这一形状 rustfmt 排不了,
-        // 会把整个 match 退成 `let forward =\n match` 的回退排版
-        MobileToRelay::RequestMirrorHistory {
-            pane_id,
-            before_seq,
-        } => {
-            let subscribed = inner.subscriptions.contains(&pane_id);
-            subscribed.then_some(RelayToDesktop::RequestMirrorHistory {
-                pane_id,
-                before_seq,
-            })
-        }
-        // 移动端指令:桌面端离线即拒(路由层生成失败回执,不做存储转发)
-        MobileToRelay::MobileCommand {
-            pane_id,
-            command_id,
-            text,
-        } => {
-            if inner.desktop.is_some() {
-                Some(RelayToDesktop::MobileCommand {
-                    pane_id,
-                    command_id,
-                    text,
-                })
-            } else {
-                reject_command_offline(&inner, "mobile command", pane_id, command_id);
-                None
-            }
-        }
-        // 点选作答 agent 提问:与移动端指令同款——桌面端离线即拒,回执同通道
-        MobileToRelay::AnswerQuestion {
-            pane_id,
-            command_id,
-            seq,
-            question_id,
-            question_index,
-            option_index,
-        } => {
-            if inner.desktop.is_some() {
-                Some(RelayToDesktop::AnswerQuestion {
-                    pane_id,
-                    command_id,
-                    seq,
-                    question_id,
-                    question_index,
-                    option_index,
-                })
-            } else {
-                reject_command_offline(&inner, "answer question", pane_id, command_id);
-                None
-            }
-        }
-        // 重命名会话:桌面端离线就丢弃。无回执通道——改没改成看结构增量回不回新
-        // title,离线时手机侧本来就看得到「桌面端离线」横幅
-        MobileToRelay::RenamePane { pane_id, title } => inner
-            .desktop
-            .is_some()
-            .then_some(RelayToDesktop::RenamePane { pane_id, title }),
-        // 发起新 AI 会话:同样离线即拒(桌面离线意味着起不来,补送没有意义)
-        MobileToRelay::StartAiSession {
-            request_id,
-            project_id,
-            launcher_id,
-        } => {
-            if inner.desktop.is_some() {
-                Some(RelayToDesktop::StartAiSession {
-                    request_id,
-                    project_id,
-                    launcher_id,
-                })
-            } else {
-                eprintln!("[relay] start ai session rejected: desktop offline");
-                if let Some(mobile) = inner.mobile.as_ref() {
-                    mobile.send(to_text(&RelayToMobile::StartSessionReceipt {
-                        request_id,
-                        ok: false,
-                        pane_id: None,
-                        reason: Some(StartSessionFailReason::DesktopOffline),
-                    }));
-                }
-                None
-            }
-        }
-    };
-    if let (Some(msg), Some(desktop)) = (forward, inner.desktop.as_ref()) {
-        desktop.send(to_text(&msg));
-    }
-}
-
-/// 桌面端离线时的路由层拒绝:直接给移动端回失败的指令回执(不做存储转发)。
-/// 移动端指令与点选作答共用——两者的回执都是 CommandReceipt。
-fn reject_command_offline(inner: &Inner, what: &str, pane_id: String, command_id: String) {
-    eprintln!("[relay] {what} rejected: desktop offline");
-    if let Some(mobile) = inner.mobile.as_ref() {
-        mobile.send(to_text(&RelayToMobile::CommandReceipt {
-            pane_id,
-            command_id,
-            ok: false,
-            reason: Some(CommandFailReason::DesktopOffline),
-        }));
-    }
-}
-
-/// 清空移动端订阅并逐一通知桌面端退订(移动端断线/被顶替/被吊销时调用)。
-fn drop_subscriptions(inner: &mut Inner) {
-    let panes: Vec<String> = inner.subscriptions.drain().collect();
-    if let Some(desktop) = inner.desktop.as_ref() {
-        for pane_id in panes {
-            desktop.send(to_text(&RelayToDesktop::UnsubscribePane { pane_id }));
-        }
-    }
-}
-
-fn deregister_mobile(state: &RelayState, generation: u64) {
-    let mut inner = state.inner.lock().unwrap();
-    if inner
-        .mobile
-        .as_ref()
-        .is_some_and(|s| s.generation == generation)
-    {
-        inner.mobile = None;
-        drop_subscriptions(&mut inner);
-    }
 }
 
 #[cfg(test)]

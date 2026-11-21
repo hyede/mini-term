@@ -47,6 +47,9 @@ async fn send_hello(ws: &mut WsClient, version: u32) {
 
 async fn send_hello_with_key(ws: &mut WsClient, version: u32, key: &str) {
     let hello = DesktopToRelay::Hello {
+        desktop_id: "desktop".into(),
+        desktop_name: "Desktop".into(),
+        device_key: "test-device-key".into(),
         protocol_version: version,
         desktop_key: key.into(),
     };

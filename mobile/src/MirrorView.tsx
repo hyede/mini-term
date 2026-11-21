@@ -3,6 +3,7 @@ import {
   answerQuestion,
   clearCommandReceipt,
   closeMirror,
+  releaseControl,
   loadOlderMirror,
   sendMobileCommand,
   useRelayStore,
@@ -622,6 +623,10 @@ export function MirrorView() {
       <div className="mirror-header">
         <button className="mirror-back" onClick={closeMirror}>
           ‹ {t('mirror.back')}
+        </button>
+        <button className="mirror-back" onClick={releaseControl}
+          disabled={!!mirror.pendingCommandId}>
+          {t('mirror.releaseControl')}
         </button>
         {/* 标题即改名入口。会话已结束/桌面端离线时改不动:pane 没了或消息送不到 */}
         <button

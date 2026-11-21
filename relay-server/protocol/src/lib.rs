@@ -1,4 +1,4 @@
-//! 中转协议 v2:JSON over WebSocket 的消息类型定义。
+//! 中转协议 v3:JSON over WebSocket 的消息类型定义。
 //!
 //! 命名纪律(见 CONTEXT.md):移动端 / 中转服务器 / 配对 / 对话镜像 / 移动端指令 /
 //! AI 启动器。所有消息经 `#[serde(tag = "type", rename_all_fields = "camelCase")]`
@@ -8,7 +8,22 @@ use serde::{Deserialize, Serialize};
 
 /// 协议版本。两端握手时严格相等校验,不匹配即拒绝(不静默错乱)。
 /// v2:桌面端握手携带共享密钥 + 移动端可发起 AI 会话(docs/adr/0002)。
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopDevice {
+    pub desktop_id: String,
+    pub name: String,
+    pub online: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairedMobile {
+    pub mobile_id: String,
+    pub name: String,
+}
 
 /// 移动端可见的单个 pane(仅处于 AI 会话中的 pane 才会出现,裸 shell 不进快照)。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -62,6 +77,7 @@ pub struct MobileLauncher {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum CommandFailReason {
+    ControlBusy,
     /// 桌面端离线:中转在路由层直接拒绝(不做存储转发)
     DesktopOffline,
     /// 目标 pane 已关闭/AI 会话已结束
@@ -172,11 +188,18 @@ pub enum DesktopToRelay {
     Hello {
         protocol_version: u32,
         desktop_key: String,
+        #[serde(default)]
+        desktop_id: String,
+        #[serde(default)]
+        desktop_name: String,
+        #[serde(default)]
+        device_key: String,
     },
     /// 请求签发一次性配对码(用于桌面端展示二维码)。旧配对码立即作废。
     RequestPairingCode,
     /// 重置配对:吊销移动端长期凭证与未用配对码,踢掉在线移动端。
     ResetPairing,
+    RevokeMobile { mobile_id: String },
     /// 结构全量快照(连上中转后/收到快照请求时/启动器配置变化时发送)。
     /// 含全部项目(无活跃 pane 的 `panes` 为空)与可用 AI 启动器名单。
     SessionsSnapshot {
@@ -206,6 +229,8 @@ pub enum DesktopToRelay {
         pane_id: String,
         messages: Vec<MirrorMessage>,
         has_more: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// 被订阅的 pane 已关闭/AI 会话已结束:移动端应提示并返回列表。
     PaneClosed { pane_id: String },
@@ -250,14 +275,21 @@ pub enum RelayToDesktop {
     /// 配对状态变化:移动端兑换凭证成功(true)/凭证被吊销或重置(false)。
     /// 桌面端握手成功后也会立即收到一次当前状态。
     PairingUpdate { paired: bool },
+    PairedDevices { devices: Vec<PairedMobile> },
     /// 移动端上线,请桌面端回发一份最新的 SessionsSnapshot(中转不缓存结构数据)。
     SessionsSnapshotRequest,
     /// 移动端订阅某 pane 的对话镜像(转发自移动端)。
     SubscribePane { pane_id: String },
+    MirrorSnapshotRequest { pane_id: String },
     /// 移动端退订(显式退出镜像页/移动端断线时由中转代发)。
     UnsubscribePane { pane_id: String },
     /// 移动端请求更早的镜像历史(转发自移动端)。
-    RequestMirrorHistory { pane_id: String, before_seq: u64 },
+    RequestMirrorHistory {
+        pane_id: String,
+        before_seq: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
     /// 移动端指令(转发自移动端):到达即写入目标 pane 的 PTY,不排队。
     MobileCommand {
         pane_id: String,
@@ -300,7 +332,15 @@ pub enum MobileToRelay {
         pairing_code: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         credential: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        desktop_id: Option<String>,
+        #[serde(default)]
+        device_name: String,
+        #[serde(default)]
+        multi_device: bool,
     },
+    SelectDesktop { desktop_id: String },
+    ReleaseControl { pane_id: String },
     /// 订阅某 pane 的对话镜像(进入镜像页)。
     SubscribePane { pane_id: String },
     /// 退订(返回列表)。
@@ -345,6 +385,11 @@ pub enum MobileToRelay {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum RelayToMobile {
+    ControlReleased { pane_id: String },
+    DesktopList {
+        devices: Vec<DesktopDevice>,
+        selected_desktop_id: Option<String>,
+    },
     /// 握手成功。configured pairing 时携带新签发的长期凭证,重连时为 None。
     HelloAck {
         protocol_version: u32,
@@ -426,21 +471,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn protocol_version_is_v2() {
+    fn protocol_version_is_v3() {
         // 两端严格相等校验:版本号是唯一的兼容性闸门,改动必须是有意的
-        assert_eq!(PROTOCOL_VERSION, 2);
+        assert_eq!(PROTOCOL_VERSION, 3);
     }
 
     #[test]
     fn desktop_hello_camel_case_round_trip() {
         let msg = DesktopToRelay::Hello {
+            desktop_id: "desktop".into(),
+            desktop_name: "Desktop".into(),
+            device_key: "test-device-key".into(),
             protocol_version: PROTOCOL_VERSION,
             desktop_key: "s3cret".into(),
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(
             json.contains(r#""type":"hello""#)
-                && json.contains(r#""protocolVersion":2"#)
+                && json.contains(r#""protocolVersion":3"#)
                 && json.contains(r#""desktopKey":"s3cret""#),
             "serde camelCase 对齐被破坏: {json}"
         );
@@ -509,6 +557,9 @@ mod tests {
     #[test]
     fn mobile_hello_with_pairing_code_round_trip() {
         let msg = MobileToRelay::Hello {
+            desktop_id: None,
+            device_name: "Mobile".into(),
+            multi_device: false,
             protocol_version: PROTOCOL_VERSION,
             pairing_code: Some("abc123".into()),
             credential: None,
@@ -525,6 +576,9 @@ mod tests {
     #[test]
     fn mobile_hello_with_credential_round_trip() {
         let msg = MobileToRelay::Hello {
+            desktop_id: None,
+            device_name: "Mobile".into(),
+            multi_device: false,
             protocol_version: PROTOCOL_VERSION,
             pairing_code: None,
             credential: Some("tok".into()),

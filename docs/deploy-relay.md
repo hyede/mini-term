@@ -14,8 +14,8 @@ mini-term desktop ──(outbound wss)──▶ ┌─────────�
 ```
 
 - TLS end to end (wss/https), with certificates terminated by the front reverse proxy.
-- Relay discipline: message bodies are forwarded in memory only and **never written to disk**; logs record connection and auth metadata only, never conversation content; the container mounts no volumes.
-- Pairing state (the one-time pairing code and the mobile long-lived credential) is also in memory only — **after a relay restart you must generate a fresh QR code on the desktop and pair again**.
+- Relay discipline: message bodies are forwarded in memory only and **never written to disk**; logs record connection and auth metadata only, never conversation content; the authorization volume stores device identities and pairing grants only.
+- Device identities and long-lived mobile grants are persisted. One-time pairing codes stay in memory; retaining the authorization volume preserves pairing across restarts.
 
 ## 1. Prerequisites
 
@@ -61,7 +61,7 @@ The public address (domain/port) is not configured on the relay — which addres
 
 ### Connection and Message Limits
 
-The relay is single-tenant and 1×1 (one desktop + one phone), so it normally holds two or three connections; the defaults are far above normal use and rarely need changing. Per-message limits are fixed in code: 16 MiB for the desktop (a mirror page of 50 text messages) and 1 MiB for the phone — the sender of an oversized message is disconnected. A connection whose outbound backlog reaches 256 frames (the peer is too slow) is disconnected too; both ends reconnect automatically and fetch a fresh full snapshot.
+The relay serves one personal device group with N desktops and N phones. Each device normally uses one connection; size global and per-IP limits accordingly. Per-message limits remain 16 MiB for desktops and 1 MiB for phones. Slow consumers with 256 queued frames are disconnected and recover through fresh snapshots.
 
 The per-client cap needs the real client address. Behind a reverse proxy the TCP peer is always the proxy itself (the bridge gateway under Docker port mapping), so set `RELAY_CLIENT_IP_HEADER` to the header the proxy writes (the last comma-separated value is used):
 
@@ -150,6 +150,19 @@ Things to keep in mind:
 
 - Restarting the relay (including recreating the container on upgrade) loses pairing state, so the phone must scan again.
 - The protocol is versioned: if the desktop and relay versions do not match, the handshake is rejected explicitly with an upgrade prompt rather than failing silently.
-- 1×1 topology: only one desktop and one phone are active at a time; pairing a new device supersedes the old one.
+- N×N topology: multiple desktops and phones share one relay. New devices do not replace other devices; reconnecting replaces only the old connection of the same identity.
 - Lost phone: desktop "Mobile" panel → reset pairing, and every mobile credential is invalidated immediately.
 - Log spot-check: `docker logs mini-term-relay` should show only connection / auth / pairing metadata, never any conversation content.
+
+
+## 6. Personal multi-device mode (protocol v3)
+
+One relay process serves one personal device group with N desktops and N phones. This is not an account system or a multi-tenant deployment. Desktops connect outbound to the same relay; terminals and AI processes stay on their respective computers.
+
+Each desktop uses the same group admission key plus an independently generated, pinned device identity/key stored in relay-device.json under the active desktop data directory. MT_APP_DATA_DIR isolates development identities. Never copy that file to another computer: copied identities replace each other's connections.
+
+Pair each phone separately. Pairing explicitly grants access to every current and future desktop in the group and does not revoke other phones. The phone's desktop selector scopes projects, mirrors, commands and replies. Multiple phones can view a mirror; the first writer owns terminal control until it releases control, leaves the mirror, switches desktops or disconnects. Local desktop keyboard input is not restricted. The desktop Mobile panel can revoke one phone; resetting pairing revokes all phones.
+
+RELAY_STATE_FILE defaults to ./relay-data/devices.json. An empty value disables persistence explicitly. Compose mounts a dedicated authorization volume, so rebuilding preserves pairing; docker compose down -v deletes that volume. Authorization files contain secrets: Unix files are created as 0600, and Windows directory ACLs must protect them. Backups must remain private. Pairing codes, subscriptions, connections and pending reply routes remain memory-only; message bodies are never persisted.
+
+Do not share the state file between multiple relay processes or randomly load-balance WebSocket connections: this is a single-process relay, not a multi-replica cluster. Existing global/per-IP connection limits still apply. Upgrade desktop, relay and PWA together to protocol v3; v2 is rejected. Initial migration from v2 requires fresh pairing because old grants were volatile. No live deployment is performed by this source change. TLS is not end-to-end encryption; trust the relay host.

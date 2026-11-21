@@ -68,6 +68,9 @@ async fn paired_desktop(addr: SocketAddr) -> WsClient {
     send_json(
         &mut ws,
         &DesktopToRelay::Hello {
+            desktop_id: "desktop".into(),
+            desktop_name: "Desktop".into(),
+            device_key: "test-device-key".into(),
             protocol_version: PROTOCOL_VERSION,
             desktop_key: DESKTOP_KEY.into(),
         },
@@ -113,6 +116,9 @@ async fn mobile_hello(
     send_json(
         &mut ws,
         &MobileToRelay::Hello {
+            desktop_id: None,
+            device_name: "Mobile".into(),
+            multi_device: false,
             protocol_version: PROTOCOL_VERSION,
             pairing_code,
             credential,
@@ -246,6 +252,9 @@ async fn mobile_version_mismatch_rejected() {
     send_json(
         &mut ws,
         &MobileToRelay::Hello {
+            desktop_id: None,
+            device_name: "Mobile".into(),
+            multi_device: false,
             protocol_version: 999,
             pairing_code: None,
             credential: None,

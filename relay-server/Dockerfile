@@ -1,7 +1,7 @@
 # mini-term 中转服务器镜像:Rust 中转 + 内置移动端 PWA 静态资源。
 # 构建上下文为仓库根目录(需要 relay-server/ 与 mobile/ 两个目录):
 #   docker build -f relay-server/Dockerfile -t mini-term-relay .
-# 中转纪律:消息体仅内存转发不落盘——镜像内不声明任何持久化卷。
+# 中转纪律:授权目录只保存设备与长期配对,消息体不落盘。
 
 # ── 阶段 1:构建移动端 PWA ──
 FROM node:22-alpine AS pwa
@@ -19,13 +19,14 @@ RUN cargo build --locked --release -p mt-relay-server
 
 # ── 阶段 3:运行时(最小化,非 root) ──
 FROM debian:bookworm-slim
-RUN useradd --system --no-create-home relay
+RUN useradd --system --no-create-home relay && mkdir -p /srv/relay-data && chown relay:relay /srv/relay-data
 COPY --from=relay /build/target/release/mt-relay-server /usr/local/bin/mt-relay-server
 COPY --from=pwa /app/dist /srv/pwa
 
 ENV RELAY_BIND=0.0.0.0 \
     RELAY_PORT=8080 \
-    RELAY_PWA_DIR=/srv/pwa
+    RELAY_PWA_DIR=/srv/pwa \
+    RELAY_STATE_FILE=/srv/relay-data/devices.json
 
 USER relay
 EXPOSE 8080

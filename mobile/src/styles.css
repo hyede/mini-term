@@ -40,12 +40,36 @@ body {
 }
 
 .app-header {
+  gap: 12px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: calc(env(safe-area-inset-top, 0px) + 12px) 16px 12px;
   border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-surface);
+}
+
+.desktop-picker {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.desktop-picker select {
+  min-width: 0;
+  max-width: 38vw;
+  padding: 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+}
+
+.desktop-picker select:focus-visible {
+  outline: 2px solid var(--accent);
 }
 
 .app-name {
