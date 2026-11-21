@@ -624,10 +624,6 @@ export function MirrorView() {
         <button className="mirror-back" onClick={closeMirror}>
           ‹ {t('mirror.back')}
         </button>
-        <button className="mirror-back" onClick={releaseControl}
-          disabled={!!mirror.pendingCommandId}>
-          {t('mirror.releaseControl')}
-        </button>
         {/* 标题即改名入口。会话已结束/桌面端离线时改不动:pane 没了或消息送不到 */}
         <button
           className="mirror-title"
@@ -636,6 +632,10 @@ export function MirrorView() {
           onClick={() => setRenaming(true)}
         >
           {mirror.title}
+        </button>
+        <button className="mirror-release-control" onClick={releaseControl}
+          disabled={!!mirror.pendingCommandId}>
+          {t('mirror.releaseControl')}
         </button>
       </div>
 
