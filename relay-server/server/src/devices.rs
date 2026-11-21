@@ -256,7 +256,16 @@ async fn pump(
             frame = outbound.recv() => match frame {
                 Some(frame) => {
                     let close = matches!(frame, Message::Close(_));
-                    if socket.send(frame).await.is_err() || close { break; }
+                    // 对端不读时写入可能一直挂起,必须在写入期间也监听溢出信号。
+                    // 取消后直接丢弃整条连接,由调用方清理订阅与待回执路由。
+                    let sent = tokio::select! {
+                        biased;
+                        _ = overflow.notified() => false,
+                        result = socket.send(frame) => result.is_ok(),
+                    };
+                    if !sent || close {
+                        break;
+                    }
                 }
                 None => break,
             },

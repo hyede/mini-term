@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::extract::connect_info::ConnectInfo;
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{Message, WebSocketUpgrade};
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderName, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -203,11 +203,6 @@ impl ConnSlot {
         }
     }
 }
-
-/// 把一帧写给对端,同时盯着出站队列的溢出信号。
-///
-/// 写本身也要和溢出赛跑:对端彻底卡死(TCP 窗口为 0)时 `send` 永远不返回,
-/// 只在外层 select 里等溢出信号就永远等不到断开的那一刻。返回 `false` = 该断开了。
 
 mod devices;
 

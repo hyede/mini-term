@@ -195,6 +195,8 @@ async fn saved_session_replies_are_private_and_request_ids_are_restored() {
     let (mut first, _) = phone(addr, &mut desktop, "first").await;
     let (mut second, _) = phone(addr, &mut desktop, "second").await;
     until(&mut desktop, "sessionsSnapshotRequest").await;
+    // 第二部手机配对会向已有手机广播设备列表,先消费它再检查回复隔离。
+    assert_eq!(recv(&mut first).await["type"], "desktopList");
     for (request_type, response_type) in [
         ("requestSessionList", "sessionList"),
         ("requestSessionContent", "sessionContent"),
@@ -226,10 +228,10 @@ async fn saved_session_replies_are_private_and_request_ids_are_restored() {
             until(&mut second, response_type).await["requestId"],
             "same-id"
         );
+        let unexpected = tokio::time::timeout(Duration::from_millis(100), first.next()).await;
         assert!(
-            tokio::time::timeout(Duration::from_millis(100), first.next())
-                .await
-                .is_err()
+            unexpected.is_err(),
+            "unexpected first phone frame: {unexpected:?}"
         );
         send(
             &mut desktop,

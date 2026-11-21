@@ -1,7 +1,7 @@
 //! Seam 1:配对全套协议边界测试。
 //!
 //! 进程内启动真实中转,模拟桌面端 + 移动端两头驱动真实协议帧:
-//! 配对码兑换凭证、错误凭证拒绝、配对码一次性、新配对顶旧、重置吊销。
+//! 配对码兑换凭证、错误凭证拒绝、配对码一次性、多设备配对共存、重置吊销。
 
 use futures_util::{SinkExt, StreamExt};
 use mt_relay_protocol::{
@@ -270,7 +270,7 @@ async fn mobile_version_mismatch_rejected() {
 }
 
 #[tokio::test]
-async fn new_pairing_revokes_old_device() {
+async fn new_pairing_keeps_existing_device_and_credential() {
     let addr = spawn_relay().await;
     let mut desktop = paired_desktop(addr).await;
 
@@ -299,21 +299,34 @@ async fn new_pairing_revokes_old_device() {
     let (_mobile_b, reply_b) = mobile_hello(addr, Some(code_b), None).await;
     assert!(matches!(reply_b, Some(RelayToMobile::HelloAck { .. })));
 
-    // 设备 A 立即收到 revoked 并被断开
+    // 新配对不顶替已有设备:设备 A 仍能订阅,由桌面端收到转发来确认连接可用。
+    send_json(
+        &mut mobile_a,
+        &MobileToRelay::SubscribePane {
+            pane_id: "pane-a".into(),
+        },
+    )
+    .await;
     assert_eq!(
-        recv_json::<RelayToMobile>(&mut mobile_a).await,
-        Some(RelayToMobile::Revoked)
+        recv_desktop_pairing(&mut desktop).await,
+        Some(RelayToDesktop::PairingUpdate { paired: true })
     );
-    assert!(recv_json::<RelayToMobile>(&mut mobile_a).await.is_none());
-
-    // 设备 A 的旧凭证重连被拒
-    let (_m, reply) = mobile_hello(addr, None, Some(cred_a)).await;
     assert_eq!(
-        reply,
-        Some(RelayToMobile::HelloReject {
-            reason: MobileRejectReason::InvalidCredential
+        recv_desktop_pairing(&mut desktop).await,
+        Some(RelayToDesktop::SubscribePane {
+            pane_id: "pane-a".into()
         })
     );
+
+    // 设备 A 的原凭证仍可重连,不再签发新凭证。
+    let (_m, reply) = mobile_hello(addr, None, Some(cred_a)).await;
+    assert!(matches!(
+        reply,
+        Some(RelayToMobile::HelloAck {
+            credential: None,
+            ..
+        })
+    ));
 }
 
 #[tokio::test]
