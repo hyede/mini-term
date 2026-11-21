@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.14.1-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-1.14.2-blue" alt="version">
   <img src="https://img.shields.io/badge/platform-Windows-0078D4" alt="platform">
   <img src="https://img.shields.io/badge/macOS%20%7C%20Linux-experimental-lightgrey" alt="platform-experimental">
   <img src="https://img.shields.io/badge/GPUI-native-8A2BE2" alt="gpui">
@@ -23,7 +23,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/dreamlonglll/mini-term/releases">下载安装包</a> ·
+  <a href="https://github.com/hyede/mini-term/releases">下载安装包</a> ·
   <a href="docs/features.zh-CN.md">完整功能清单</a> ·
   <a href="docs/deploy-relay.zh-CN.md">中转部署</a>
 </p>
@@ -37,7 +37,9 @@ https://github.com/user-attachments/assets/8a9c1dca-7289-4ab6-af1f-5158df7368a4
 
 **GPUI 原生实现**：Rust 原生渲染、单进程，界面不依赖 WebView2（只有 HTML / PDF 预览按需调用系统 WebView，缺失时回落简版渲染或打开提示）。
 
-> 早期的 Tauri + React 实现已于 v1.0.0-beta 后从仓库移除并停止发布（历史版本安装包仍可在旧 Release 下载，源码看 git 历史）。
+> 本仓库是 [dreamlonglll/mini-term](https://github.com/dreamlonglll/mini-term) 的 fork；下载安装包及更新检查使用本仓库的 Releases。
+>
+> 早期的 Tauri + React 实现已于 v1.0.0-beta 后从仓库移除并停止发布（历史版本安装包仍可在[上游 Releases](https://github.com/dreamlonglll/mini-term/releases) 下载，源码看 git 历史）。
 
 ---
 
@@ -119,7 +121,7 @@ https://github.com/user-attachments/assets/8a9c1dca-7289-4ab6-af1f-5158df7368a4
 
 ### 下载安装
 
-前往 [Releases](https://github.com/dreamlonglll/mini-term/releases) 下载，三平台产物：
+前往 [Releases](https://github.com/hyede/mini-term/releases) 下载，三平台产物：
 
 - **Windows x64（主要支持平台）** — `Mini-Term_*_x64-setup.exe` 安装包（NSIS，用户级安装免管理员；装过旧版的默认原目录升级，且**先卸载旧版再装**而不是文件覆盖写；桌面快捷方式在组件页自行勾选，升级时沿用上一次的选择）
 - **macOS arm64（Apple Silicon）** — `Mini-Term_*_aarch64.dmg`
@@ -141,7 +143,7 @@ xattr -cr /Applications/Mini-Term.app
 需要 Rust >= 1.95（仓库根 `rust-toolchain.toml` 钉在 1.98.1，装了 rustup 会自动切过去）；构建 sidecar 就位脚本需要 Node.js >= 20（仅标准库，无 npm 依赖）。
 
 ```bash
-git clone https://github.com/dreamlonglll/mini-term.git
+git clone https://github.com/hyede/mini-term.git
 cd mini-term
 
 node scripts/stage-sidecars.mjs      # 构建三个 sidecar 并连同便携 ConPTY 就位到 target/debug/
@@ -175,7 +177,7 @@ Worktree 新建、删除和清理与同仓库其他写操作共用写操作闸�
 
 - 📖 **[完整功能清单](docs/features.zh-CN.md)** — 每一项功能的详细说明、架构概览与边界条件
 - 📱 **[中转服务部署文档](docs/deploy-relay.zh-CN.md)** — 手机远程功能所需的自托管中转
-- 🐛 **[提 Issue / PR](https://github.com/dreamlonglll/mini-term/issues)** — 外部贡献会经过功能验证和安全审查后合并
+- 🐛 **[提 Issue / PR](https://github.com/hyede/mini-term/issues)** — 外部贡献会经过功能验证和安全审查后合并
 
 ## 许可证
 

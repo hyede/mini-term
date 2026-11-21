@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.14.1-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-1.14.2-blue" alt="version">
   <img src="https://img.shields.io/badge/platform-Windows-0078D4" alt="platform">
   <img src="https://img.shields.io/badge/macOS%20%7C%20Linux-experimental-lightgrey" alt="platform-experimental">
   <img src="https://img.shields.io/badge/GPUI-native-8A2BE2" alt="gpui">
@@ -23,7 +23,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/dreamlonglll/mini-term/releases">Download</a> ·
+  <a href="https://github.com/hyede/mini-term/releases">Download</a> ·
   <a href="docs/features.md">Full feature list</a> ·
   <a href="docs/deploy-relay.md">Relay deployment</a>
 </p>
@@ -37,7 +37,9 @@ https://github.com/user-attachments/assets/8a9c1dca-7289-4ab6-af1f-5158df7368a4
 
 **GPUI-native implementation**: Rust-native rendering, single process; the UI does not depend on WebView2 (only the HTML / PDF previews use the system WebView on demand, falling back to a simplified renderer or an open-with notice when it is missing).
 
-> The earlier Tauri + React implementation was removed from the repository and discontinued after v1.0.0-beta (old installers remain downloadable on past Releases; the source lives in git history).
+> This repository is a fork of [dreamlonglll/mini-term](https://github.com/dreamlonglll/mini-term). Downloads and update checks use this repository's Releases.
+>
+> The earlier Tauri + React implementation was removed from the repository and discontinued after v1.0.0-beta (old installers remain downloadable on [upstream Releases](https://github.com/dreamlonglll/mini-term/releases); the source lives in git history).
 
 ---
 
@@ -117,7 +119,7 @@ The whole application is **native Rust**:
 
 ### Download
 
-Grab the latest build from [Releases](https://github.com/dreamlonglll/mini-term/releases) — three platforms:
+Grab the latest build from [Releases](https://github.com/hyede/mini-term/releases) — three platforms:
 
 - **Windows x64 (primary platform)** — `Mini-Term_*_x64-setup.exe` installer (NSIS, per-user install without admin rights; upgrades in the same directory, and **uninstalls the old build first** instead of overwriting files; the desktop shortcut is an opt-in checkbox on the components page, and upgrades keep your previous choice)
 - **macOS arm64 (Apple Silicon)** — `Mini-Term_*_aarch64.dmg`
@@ -139,7 +141,7 @@ xattr -cr /Applications/Mini-Term.app
 Requires Rust >= 1.95 (the repo-root `rust-toolchain.toml` pins 1.98.1, which rustup switches to automatically); the sidecar staging script needs Node.js >= 20 (standard library only, no npm dependencies).
 
 ```bash
-git clone https://github.com/dreamlonglll/mini-term.git
+git clone https://github.com/hyede/mini-term.git
 cd mini-term
 
 node scripts/stage-sidecars.mjs      # build the three sidecars and stage them (plus portable ConPTY) into target/debug/
@@ -169,7 +171,7 @@ Revoking a project's permission stops new remote Git operations for that project
 
 - 📖 **[Full feature list](docs/features.md)** — every feature in detail, plus architecture overview and known limitations
 - 📱 **[Relay deployment guide](docs/deploy-relay.md)** — the self-hosted relay behind the mobile features
-- 🐛 **[Issues / PRs](https://github.com/dreamlonglll/mini-term/issues)** — external contributions are merged after functional verification and a security review
+- 🐛 **[Issues / PRs](https://github.com/hyede/mini-term/issues)** — external contributions are merged after functional verification and a security review
 
 ## License
 

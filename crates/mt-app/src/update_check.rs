@@ -106,7 +106,7 @@ pub fn format_published_at(iso: &str) -> String {
 }
 
 /// GitHub 上的仓库(`updateChecker.ts:3`)。
-const GITHUB_REPO: &str = "dreamlonglll/mini-term";
+const GITHUB_REPO: &str = "hyede/mini-term";
 
 /// 一条 release 的关键信息。
 #[derive(Clone, Debug)]
