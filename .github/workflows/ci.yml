@@ -113,6 +113,7 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           REF_TYPE: ${{ github.ref_type }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          IS_FORK: ${{ github.event.repository.fork }}
         run: bash .github/scripts/resolve_diff_base.sh
 
       # Keep this list aligned with the Linux build job in release.yml. GPUI's
@@ -257,6 +258,7 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           REF_TYPE: ${{ github.ref_type }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          IS_FORK: ${{ github.event.repository.fork }}
         run: bash .github/scripts/resolve_diff_base.sh
 
       # 变更行过滤与 crate 名单两个脚本要 node;镜像自带的版本不钉,这里钉成与 Linux 同一个

@@ -231,7 +231,9 @@ pub enum DesktopToRelay {
     RequestPairingCode,
     /// 重置配对:吊销移动端长期凭证与未用配对码,踢掉在线移动端。
     ResetPairing,
-    RevokeMobile { mobile_id: String },
+    RevokeMobile {
+        mobile_id: String,
+    },
     /// 结构全量快照(连上中转后/收到快照请求时/启动器配置变化时发送)。
     /// 含全部项目(无活跃 pane 的 `panes` 为空)与可用 AI 启动器名单。
     SessionsSnapshot {
@@ -326,13 +328,21 @@ pub enum RelayToDesktop {
     PairingCode { code: String },
     /// 配对状态变化:移动端兑换凭证成功(true)/凭证被吊销或重置(false)。
     /// 桌面端握手成功后也会立即收到一次当前状态。
-    PairingUpdate { paired: bool },
-    PairedDevices { devices: Vec<PairedMobile> },
+    PairingUpdate {
+        paired: bool,
+    },
+    PairedDevices {
+        devices: Vec<PairedMobile>,
+    },
     /// 移动端上线,请桌面端回发一份最新的 SessionsSnapshot(中转不缓存结构数据)。
     SessionsSnapshotRequest,
     /// 移动端订阅某 pane 的对话镜像(转发自移动端)。
-    SubscribePane { pane_id: String },
-    MirrorSnapshotRequest { pane_id: String },
+    SubscribePane {
+        pane_id: String,
+    },
+    MirrorSnapshotRequest {
+        pane_id: String,
+    },
     /// 移动端退订(显式退出镜像页/移动端断线时由中转代发)。
     UnsubscribePane { pane_id: String },
     /// 移动端请求更早的镜像历史(转发自移动端)。
@@ -411,8 +421,12 @@ pub enum MobileToRelay {
         #[serde(default)]
         multi_device: bool,
     },
-    SelectDesktop { desktop_id: String },
-    ReleaseControl { pane_id: String },
+    SelectDesktop {
+        desktop_id: String,
+    },
+    ReleaseControl {
+        pane_id: String,
+    },
     /// 订阅某 pane 的对话镜像(进入镜像页)。
     SubscribePane { pane_id: String },
     /// 退订(返回列表)。
@@ -474,7 +488,9 @@ pub enum RelayToMobile {
         has_more: bool,
         reason: Option<StartSessionFailReason>,
     },
-    ControlReleased { pane_id: String },
+    ControlReleased {
+        pane_id: String,
+    },
     DesktopList {
         devices: Vec<DesktopDevice>,
         selected_desktop_id: Option<String>,

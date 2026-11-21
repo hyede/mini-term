@@ -147,9 +147,14 @@ async fn command_routes_to_desktop_and_receipt_returns() {
         _ => panic!("expected mobile command"),
     };
     assert_ne!(route_id, "cmd-1");
-    assert_eq!(forwarded, RelayToDesktop::MobileCommand {
-        pane_id: "pane-1".into(), command_id: route_id.clone(), text: "npm test".into(),
-    });
+    assert_eq!(
+        forwarded,
+        RelayToDesktop::MobileCommand {
+            pane_id: "pane-1".into(),
+            command_id: route_id.clone(),
+            text: "npm test".into(),
+        }
+    );
 
     // "已写入"回执 → 移动端
     send_json(
@@ -197,10 +202,17 @@ async fn answer_question_routes_and_rejects_when_offline() {
         RelayToDesktop::AnswerQuestion { command_id, .. } => command_id.clone(),
         _ => panic!("expected answer question"),
     };
-    assert_eq!(forwarded, RelayToDesktop::AnswerQuestion {
-        pane_id: "pane-1".into(), command_id: route_id, seq: 5,
-        question_id: "toolu_q1".into(), question_index: 0, option_index: 1,
-    });
+    assert_eq!(
+        forwarded,
+        RelayToDesktop::AnswerQuestion {
+            pane_id: "pane-1".into(),
+            command_id: route_id,
+            seq: 5,
+            question_id: "toolu_q1".into(),
+            question_index: 0,
+            option_index: 1,
+        }
+    );
 
     // 桌面端下线后作答即拒,回执走同一 CommandReceipt 通道
     desktop.close(None).await.unwrap();
@@ -285,8 +297,13 @@ async fn target_missing_failure_receipt_is_routed() {
         },
     )
     .await;
-    let Some(RelayToDesktop::MobileCommand { command_id: route_id, .. }) =
-        recv_json::<RelayToDesktop>(&mut desktop).await else { panic!("expected mobile command"); };
+    let Some(RelayToDesktop::MobileCommand {
+        command_id: route_id,
+        ..
+    }) = recv_json::<RelayToDesktop>(&mut desktop).await
+    else {
+        panic!("expected mobile command");
+    };
 
     // 桌面端发现目标不存在 → 失败回执原样送达移动端
     send_json(
@@ -331,9 +348,14 @@ async fn start_ai_session_routes_to_desktop_and_receipt_returns() {
         RelayToDesktop::StartAiSession { request_id, .. } => request_id.clone(),
         _ => panic!("expected start session"),
     };
-    assert_eq!(forwarded, RelayToDesktop::StartAiSession {
-        request_id: route_id.clone(), project_id: "p1".into(), launcher_id: "l1".into(),
-    });
+    assert_eq!(
+        forwarded,
+        RelayToDesktop::StartAiSession {
+            request_id: route_id.clone(),
+            project_id: "p1".into(),
+            launcher_id: "l1".into(),
+        }
+    );
 
     // "pane 已建、命令已写入"回执 → 移动端
     send_json(
@@ -372,8 +394,13 @@ async fn start_ai_session_failure_receipt_is_routed() {
         },
     )
     .await;
-    let Some(RelayToDesktop::StartAiSession { request_id: route_id, .. }) =
-        recv_json::<RelayToDesktop>(&mut desktop).await else { panic!("expected start session"); };
+    let Some(RelayToDesktop::StartAiSession {
+        request_id: route_id,
+        ..
+    }) = recv_json::<RelayToDesktop>(&mut desktop).await
+    else {
+        panic!("expected start session");
+    };
 
     send_json(
         &mut desktop,

@@ -15,7 +15,8 @@ impl DeviceIdentity {
     pub(crate) fn new() -> Self {
         Self {
             desktop_id: uuid::Uuid::new_v4().simple().to_string(),
-            desktop_name: std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME"))
+            desktop_name: std::env::var("COMPUTERNAME")
+                .or_else(|_| std::env::var("HOSTNAME"))
                 .unwrap_or_else(|_| "Desktop".into()),
             device_key: uuid::Uuid::new_v4().simple().to_string(),
         }
@@ -26,13 +27,21 @@ impl DeviceIdentity {
             Ok(bytes) => {
                 let identity: Self = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
                 if identity.desktop_id.is_empty() || identity.device_key.is_empty() {
-                    return Err(io::Error::new(io::ErrorKind::InvalidData, "empty relay device identity"));
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "empty relay device identity",
+                    ));
                 }
                 Ok(identity)
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 let identity = Self::new();
-                let parent = path.parent().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "device identity path has no parent"))?;
+                let parent = path.parent().ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "device identity path has no parent",
+                    )
+                })?;
                 std::fs::create_dir_all(parent)?;
                 let temporary = parent.join(format!(".relay-device-{}.tmp", uuid::Uuid::new_v4()));
                 let mut options = std::fs::OpenOptions::new();
@@ -77,7 +86,12 @@ mod tests {
         std::fs::write(&path, corrupt).unwrap();
         assert!(DeviceIdentity::load(&path).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), corrupt);
-        assert!(root.file_name().unwrap().to_string_lossy().starts_with("mt-device-"));
+        assert!(
+            root.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("mt-device-")
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }

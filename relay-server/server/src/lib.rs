@@ -382,14 +382,17 @@ fn random_id() -> String {
 }
 
 async fn desktop_ws_handler(
-    ws: WebSocketUpgrade, State(state): State<RelayState>, headers: HeaderMap,
+    ws: WebSocketUpgrade,
+    State(state): State<RelayState>,
+    headers: HeaderMap,
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
 ) -> Response {
     let permit = match state.admit_request("desktop", &headers, peer) {
         Ok(permit) => permit,
         Err(reason) => return reason.into_response(),
     };
-    ws.max_message_size(DESKTOP_MAX_MESSAGE_BYTES).max_frame_size(DESKTOP_MAX_MESSAGE_BYTES)
+    ws.max_message_size(DESKTOP_MAX_MESSAGE_BYTES)
+        .max_frame_size(DESKTOP_MAX_MESSAGE_BYTES)
         .on_upgrade(move |socket| async move {
             let _permit = permit;
             devices::desktop(socket, state).await;
@@ -397,14 +400,17 @@ async fn desktop_ws_handler(
 }
 
 async fn mobile_ws_handler(
-    ws: WebSocketUpgrade, State(state): State<RelayState>, headers: HeaderMap,
+    ws: WebSocketUpgrade,
+    State(state): State<RelayState>,
+    headers: HeaderMap,
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
 ) -> Response {
     let permit = match state.admit_request("mobile", &headers, peer) {
         Ok(permit) => permit,
         Err(reason) => return reason.into_response(),
     };
-    ws.max_message_size(MOBILE_MAX_MESSAGE_BYTES).max_frame_size(MOBILE_MAX_MESSAGE_BYTES)
+    ws.max_message_size(MOBILE_MAX_MESSAGE_BYTES)
+        .max_frame_size(MOBILE_MAX_MESSAGE_BYTES)
         .on_upgrade(move |socket| async move {
             let _permit = permit;
             devices::mobile(socket, state).await;

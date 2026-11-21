@@ -1039,7 +1039,9 @@ pub fn install(store: Entity<AppStore>, window: &mut Window, cx: &mut App) -> En
     });
     let events: Arc<dyn RelayEvents> = Arc::new(EventsImpl { tx });
     let manager = Arc::new(MobileRelayManager::new(host, events));
-    let identity_path = mt_config::active_data_dir().ok().map(|dir| dir.join("relay-device.json"));
+    let identity_path = mt_config::active_data_dir()
+        .ok()
+        .map(|dir| dir.join("relay-device.json"));
     if let Err(error) = manager.configure_device_identity(identity_path.as_deref()) {
         eprintln!("[mobile-relay] persistent device identity unavailable: {error}");
     }

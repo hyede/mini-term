@@ -538,20 +538,41 @@ fn render_body(
     for (index, device) in frame.paired_devices.iter().enumerate() {
         let mobile_id = device.mobile_id.clone();
         qr_section = qr_section.child(
-            div().flex().items_center().justify_between().gap(px(8.0))
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(8.0))
                 .child(device.name.clone())
-                .child(danger_ghost_button(("relay-revoke-mobile", index), t("mobileRelay", "modal.revokeMobile"))
+                .child(
+                    danger_ghost_button(
+                        ("relay-revoke-mobile", index),
+                        t("mobileRelay", "modal.revokeMobile"),
+                    )
                     .on_click({
                         let state = state.clone();
                         move |_: &ClickEvent, window, cx| {
                             let state = state.clone();
                             let mobile_id = mobile_id.clone();
-                            Confirm::new(t("mobileRelay", "modal.revokeMobile"), t("mobileRelay", "modal.revokeConfirm"))
-                                .open(move |_, cx| {
-                                    let _ = state.read(cx).bridge.read(cx).manager().revoke_mobile(&mobile_id);
-                                }, window, cx);
+                            Confirm::new(
+                                t("mobileRelay", "modal.revokeMobile"),
+                                t("mobileRelay", "modal.revokeConfirm"),
+                            )
+                            .open(
+                                move |_, cx| {
+                                    let _ = state
+                                        .read(cx)
+                                        .bridge
+                                        .read(cx)
+                                        .manager()
+                                        .revoke_mobile(&mobile_id);
+                                },
+                                window,
+                                cx,
+                            );
                         }
-                    })),
+                    }),
+                ),
         );
     }
     body.child(qr_section.child(buttons)).into_any_element()

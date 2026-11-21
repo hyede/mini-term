@@ -15,8 +15,9 @@ use std::sync::{Arc, OnceLock};
 
 use futures_util::{SinkExt, StreamExt};
 use mt_relay_protocol::{
-    CommandFailReason, DesktopRejectReason, DesktopToRelay, MirrorMessage, MobileLauncher,
-    HistorySession, MobilePane, MobileProject, RelayToDesktop, StartSessionFailReason, PROTOCOL_VERSION,
+    CommandFailReason, DesktopRejectReason, DesktopToRelay, HistorySession, MirrorMessage,
+    MobileLauncher, MobilePane, MobileProject, PROTOCOL_VERSION, RelayToDesktop,
+    StartSessionFailReason,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -463,11 +464,20 @@ impl MobileRelayManager {
     }
 
     pub fn configure_device_identity(&self, path: Option<&std::path::Path>) -> Result<(), String> {
-        let identity = path.ok_or_else(|| "relay device data directory unavailable".to_string())
-            .and_then(|path| crate::device::DeviceIdentity::load(path).map_err(|error| error.to_string()));
+        let identity = path
+            .ok_or_else(|| "relay device data directory unavailable".to_string())
+            .and_then(|path| {
+                crate::device::DeviceIdentity::load(path).map_err(|error| error.to_string())
+            });
         match identity {
-            Ok(identity) => { *self.identity.lock() = Some(identity); Ok(()) }
-            Err(error) => { *self.identity.lock() = None; Err(error) }
+            Ok(identity) => {
+                *self.identity.lock() = Some(identity);
+                Ok(())
+            }
+            Err(error) => {
+                *self.identity.lock() = None;
+                Err(error)
+            }
         }
     }
 
@@ -476,7 +486,9 @@ impl MobileRelayManager {
     }
 
     pub fn revoke_mobile(&self, mobile_id: &str) -> Result<(), String> {
-        self.send(DesktopToRelay::RevokeMobile { mobile_id: mobile_id.into() })
+        self.send(DesktopToRelay::RevokeMobile {
+            mobile_id: mobile_id.into(),
+        })
     }
 
     /// 重置配对:吊销移动端全部凭证;结果经状态回调的 `paired` 字段推回。
@@ -502,7 +514,9 @@ impl MobileRelayManager {
                 }
             }
         }
-        self.ambiguous_mirrors.lock().retain(|pty_id, _| pane_ptys.values().any(|current| current == pty_id));
+        self.ambiguous_mirrors
+            .lock()
+            .retain(|pty_id, _| pane_ptys.values().any(|current| current == pty_id));
         *self.pane_ptys.lock() = pane_ptys;
 
         // 订阅中的 pane 已不在活跃集合(pane 关闭/AI 会话结束)→ PaneClosed
@@ -522,7 +536,10 @@ impl MobileRelayManager {
         let pane_ids: Vec<_> = self.pane_paths.lock().keys().cloned().collect();
         for pane_id in pane_ids {
             if matches!(self.mirror_locate_key(&pane_id), LocateKey::Ambiguous) {
-                let subscription = self.mirror_subs.lock().get(&pane_id)
+                let subscription = self
+                    .mirror_subs
+                    .lock()
+                    .get(&pane_id)
                     .map(|sub| (sub.messages.clone(), sub.runtime.clone()));
                 if let Some((messages, runtime)) = subscription {
                     self.clear_mirror(&pane_id, &messages, &runtime);
@@ -822,19 +839,29 @@ impl MobileRelayManager {
     fn mirror_has_peer(&self, pane_id: &str) -> bool {
         let peers: Vec<_> = {
             let paths = self.pane_paths.lock();
-            let Some(project_path) = paths.get(pane_id) else { return false };
-            paths.iter().filter(|(other_id, other_path)| {
-                other_id.as_str() != pane_id && if cfg!(windows) {
-                    mt_core::path_key::windows_eq_key(other_path) == mt_core::path_key::windows_eq_key(project_path)
-                } else {
-                    Path::new(other_path.as_str()) == Path::new(project_path.as_str())
-                }
-            }).map(|(other_id, _)| other_id.clone()).collect()
+            let Some(project_path) = paths.get(pane_id) else {
+                return false;
+            };
+            paths
+                .iter()
+                .filter(|(other_id, other_path)| {
+                    other_id.as_str() != pane_id
+                        && if cfg!(windows) {
+                            mt_core::path_key::windows_eq_key(other_path)
+                                == mt_core::path_key::windows_eq_key(project_path)
+                        } else {
+                            Path::new(other_path.as_str()) == Path::new(project_path.as_str())
+                        }
+                })
+                .map(|(other_id, _)| other_id.clone())
+                .collect()
         };
         let ptys = self.pane_ptys.lock().clone();
         peers.iter().any(|other_id| {
             let agent = ptys.get(other_id).and_then(|pty| {
-                self.host.hook_session(*pty).and_then(|session| session.agent)
+                self.host
+                    .hook_session(*pty)
+                    .and_then(|session| session.agent)
                     .or_else(|| self.host.ai_session_agent(*pty))
             });
             agent.as_deref().is_none_or(mirror::agent_has_session_log)
@@ -854,7 +881,9 @@ impl MobileRelayManager {
         cached.clear();
         if changed {
             let _ = self.send(DesktopToRelay::MirrorSnapshot {
-                pane_id: pane_id.into(), messages: vec![], has_more: false,
+                pane_id: pane_id.into(),
+                messages: vec![],
+                has_more: false,
             });
         }
         changed
@@ -913,7 +942,13 @@ impl MobileRelayManager {
     /// 全量同样要改标来源:移动端发起的新会话里第一条指令、重订阅时早先发过的
     /// 移动端指令都只在这份全量里出现,不改标就一律显示成桌面输入。改标也在锁外
     /// (只取叶子锁 `recent_mobile_cmds`)。
-    fn rebind_mirror(&self, job: &MirrorJob, path: PathBuf, agent: MirrorAgent, expected_key: &LocateKey) -> bool {
+    fn rebind_mirror(
+        &self,
+        job: &MirrorJob,
+        path: PathBuf,
+        agent: MirrorAgent,
+        expected_key: &LocateKey,
+    ) -> bool {
         let mut parser = MirrorParser::new(agent, &job.project_path);
         let Some((mut msgs, cursor)) = mirror::parse_whole_file(&path, &mut parser) else {
             return false;
@@ -961,12 +996,18 @@ impl MobileRelayManager {
     fn send_current_mirror(&self, pane_id: &str) {
         let slice = {
             let subs = self.mirror_subs.lock();
-            let Some(sub) = subs.get(pane_id) else { return; };
+            let Some(sub) = subs.get(pane_id) else {
+                return;
+            };
             let messages = sub.messages.lock();
             history_slice(&messages, None, MIRROR_PAGE_SIZE)
         };
         let (messages, has_more) = slice;
-        let _ = self.send(DesktopToRelay::MirrorSnapshot { pane_id: pane_id.into(), messages, has_more });
+        let _ = self.send(DesktopToRelay::MirrorSnapshot {
+            pane_id: pane_id.into(),
+            messages,
+            has_more,
+        });
     }
 
     /// 发送当前全量快照(握手成功后 / 收到中转的快照请求时 / 启动器配置变化时)。
@@ -1241,9 +1282,11 @@ async fn connect_once(
 /// 处理中转推来的消息(已握手连接上)。
 fn handle_relay_message(manager: &Arc<MobileRelayManager>, text: &str) {
     match serde_json::from_str::<RelayToDesktop>(text) {
-        Ok(request @ (RelayToDesktop::RequestSessionList { .. }
+        Ok(
+            request @ (RelayToDesktop::RequestSessionList { .. }
             | RelayToDesktop::RequestSessionContent { .. }
-            | RelayToDesktop::ResumeAiSession { .. })) => handle_history_request(manager, request),
+            | RelayToDesktop::ResumeAiSession { .. }),
+        ) => handle_history_request(manager, request),
         Ok(RelayToDesktop::PairingCode { code }) => manager.events.pairing_code(code),
         Ok(RelayToDesktop::PairingUpdate { paired }) => manager.set_paired(paired),
         Ok(RelayToDesktop::PairedDevices { devices }) => {
@@ -1254,7 +1297,9 @@ fn handle_relay_message(manager: &Arc<MobileRelayManager>, text: &str) {
         Ok(RelayToDesktop::SessionsSnapshotRequest) => manager.send_snapshot(),
         // 对话镜像:订阅/退订/分页
         Ok(RelayToDesktop::SubscribePane { pane_id }) => manager.subscribe_pane(pane_id),
-        Ok(RelayToDesktop::MirrorSnapshotRequest { pane_id }) => manager.send_current_mirror(&pane_id),
+        Ok(RelayToDesktop::MirrorSnapshotRequest { pane_id }) => {
+            manager.send_current_mirror(&pane_id)
+        }
         Ok(RelayToDesktop::UnsubscribePane { pane_id }) => manager.unsubscribe_pane(&pane_id),
         Ok(RelayToDesktop::RequestMirrorHistory {
             pane_id,
@@ -1520,12 +1565,10 @@ fn read_history_request(
     | RelayToDesktop::ResumeAiSession {
         agent, session_id, ..
     } = request
+        && (!mt_ai::sessions::session_id_path_safe(session_id)
+            || !mt_ai::sessions::agent_has_session_log(agent))
     {
-        if !mt_ai::sessions::session_id_path_safe(session_id)
-            || !mt_ai::sessions::agent_has_session_log(agent)
-        {
-            return Err(StartSessionFailReason::SessionNotFound);
-        }
+        return Err(StartSessionFailReason::SessionNotFound);
     }
     let mut sessions = mt_ai::sessions::get_ai_sessions(project.path.clone())
         .map_err(|_| StartSessionFailReason::ReadFailed)?;
@@ -1641,11 +1684,9 @@ fn read_history_request(
                     {
                         let cwd = mt_ai::sessions::lookup_ai_session_cwd(session_id.clone())
                             .ok_or(StartSessionFailReason::SessionNotFound)?;
-                        let root = Path::new(&project.path)
-                            .canonicalize()
+                        let root = mt_core::path::canonicalize(&project.path)
                             .map_err(|_| StartSessionFailReason::ReadFailed)?;
-                        let resolved = Path::new(&cwd)
-                            .canonicalize()
+                        let resolved = mt_core::path::canonicalize(&cwd)
                             .map_err(|_| StartSessionFailReason::ReadFailed)?;
                         if !resolved.starts_with(root) {
                             return Err(StartSessionFailReason::NotSupported);
@@ -2958,7 +2999,10 @@ mod tests {
             Ok(())
         }
         fn hook_session(&self, pty_id: u32) -> Option<HookSessionId> {
-            self.hook_sessions.lock().get(&pty_id).cloned()
+            self.hook_sessions
+                .lock()
+                .get(&pty_id)
+                .cloned()
                 .or_else(|| self.hook.lock().clone())
         }
         fn ai_session_agent(&self, _pty_id: u32) -> Option<String> {
@@ -3033,13 +3077,16 @@ mod tests {
                 path: self.job.project_path.clone(),
                 ssh_connection_id: None,
                 group_path: vec![],
-                panes: panes.iter().map(|(pane_id, pty_id)| SyncPane {
-                    pane_id: (*pane_id).into(),
-                    title: "Codex".into(),
-                    status: "ai-idle".into(),
-                    pty_id: Some(*pty_id),
-                    needs_attention: false,
-                }).collect(),
+                panes: panes
+                    .iter()
+                    .map(|(pane_id, pty_id)| SyncPane {
+                        pane_id: (*pane_id).into(),
+                        title: "Codex".into(),
+                        status: "ai-idle".into(),
+                        pty_id: Some(*pty_id),
+                        needs_attention: false,
+                    })
+                    .collect(),
             }]);
         }
 
@@ -3099,44 +3146,75 @@ mod tests {
         let latest = fixture.codex_file("first", "first Codex reply");
         let second = fixture.mirror_job("pane-2");
         for job in [&fixture.job, &second] {
-            fixture.manager.mirror_round(job, &mut MirrorLocator::default(), Instant::now(), |_, key| {
-                match key {
+            fixture.manager.mirror_round(
+                job,
+                &mut MirrorLocator::default(),
+                Instant::now(),
+                |_, key| match key {
                     LocateKey::Heuristic { .. } => Some((latest.clone(), MirrorAgent::Codex)),
                     _ => None,
-                }
-            });
+                },
+            );
         }
         assert!(
             second.messages.lock().is_empty(),
             "第二个 Codex 不能显示第一个的会话: {:?}",
-            second.messages.lock().iter().map(|message| &message.content).collect::<Vec<_>>()
+            second
+                .messages
+                .lock()
+                .iter()
+                .map(|message| &message.content)
+                .collect::<Vec<_>>()
         );
-        assert!(fixture.texts().is_empty(), "缺少身份时两条会话都不应猜测绑定");
+        assert!(
+            fixture.texts().is_empty(),
+            "缺少身份时两条会话都不应猜测绑定"
+        );
     }
 
     #[test]
     fn two_idle_codex_panes_with_hook_identity_keep_distinct_transcripts() {
         let fixture = MirrorFixture::new("two-codex-hooks");
         for (pty_id, session_id) in [(7, "first"), (8, "second")] {
-            fixture.host.hook_sessions.lock().insert(pty_id, HookSessionId {
-                agent: Some("codex".into()), session_id: session_id.into(),
-            });
+            fixture.host.hook_sessions.lock().insert(
+                pty_id,
+                HookSessionId {
+                    agent: Some("codex".into()),
+                    session_id: session_id.into(),
+                },
+            );
         }
         fixture.sync_codex_panes(&[("pane-1", 7), ("pane-2", 8)]);
         let paths = HashMap::from([
             ("first", fixture.codex_file("first", "first Codex reply")),
             ("second", fixture.codex_file("second", "second Codex reply")),
         ]);
-        for (pane_id, expected) in [("pane-1", "first Codex reply"), ("pane-2", "second Codex reply"), ("pane-1", "first Codex reply")] {
+        for (pane_id, expected) in [
+            ("pane-1", "first Codex reply"),
+            ("pane-2", "second Codex reply"),
+            ("pane-1", "first Codex reply"),
+        ] {
             let job = fixture.mirror_job(pane_id);
-            fixture.manager.mirror_round(&job, &mut MirrorLocator::default(), Instant::now(), |_, key| {
-                match key {
-                    LocateKey::Hook { session_id, .. } => paths.get(session_id.as_str()).cloned()
+            fixture.manager.mirror_round(
+                &job,
+                &mut MirrorLocator::default(),
+                Instant::now(),
+                |_, key| match key {
+                    LocateKey::Hook { session_id, .. } => paths
+                        .get(session_id.as_str())
+                        .cloned()
                         .map(|path| (path, MirrorAgent::Codex)),
                     _ => None,
-                }
-            });
-            assert_eq!(job.messages.lock().iter().map(|message| message.content.clone()).collect::<Vec<_>>(), [expected]);
+                },
+            );
+            assert_eq!(
+                job.messages
+                    .lock()
+                    .iter()
+                    .map(|message| message.content.clone())
+                    .collect::<Vec<_>>(),
+                [expected]
+            );
         }
     }
 
@@ -3146,7 +3224,9 @@ mod tests {
         fixture.sync_codex_panes(&[("pane-1", 7)]);
         let path = fixture.codex_file("first", "first Codex reply");
         let locate = |_: &str, key: &LocateKey| match key {
-            LocateKey::Heuristic { .. } | LocateKey::Hook { .. } => Some((path.clone(), MirrorAgent::Codex)),
+            LocateKey::Heuristic { .. } | LocateKey::Hook { .. } => {
+                Some((path.clone(), MirrorAgent::Codex))
+            }
             _ => None,
         };
         let (sender, mut receiver) = mpsc::unbounded_channel();
@@ -3154,27 +3234,44 @@ mod tests {
         fixture.round(&mut MirrorLocator::default(), Instant::now(), locate);
         assert_eq!(fixture.texts(), ["first Codex reply"]);
         let (cancel_tx, _) = watch::channel(false);
-        fixture.manager.mirror_subs.lock().insert("pane-1".into(), MirrorSub {
-            cancel_tx,
-            messages: fixture.job.messages.clone(),
-            runtime: fixture.job.runtime.clone(),
-        });
+        fixture.manager.mirror_subs.lock().insert(
+            "pane-1".into(),
+            MirrorSub {
+                cancel_tx,
+                messages: fixture.job.messages.clone(),
+                runtime: fixture.job.runtime.clone(),
+            },
+        );
         while receiver.try_recv().is_ok() {}
         fixture.sync_codex_panes(&[("pane-1", 7), ("pane-2", 8)]);
         assert_eq!(fixture.bound(), None, "出现竞争会话时必须立即清掉旧绑定");
         assert!(fixture.texts().is_empty());
-        assert!(std::iter::from_fn(|| receiver.try_recv().ok()).any(|message| {
-            matches!(message, DesktopToRelay::MirrorSnapshot { pane_id, messages, .. }
+        assert!(
+            std::iter::from_fn(|| receiver.try_recv().ok()).any(|message| {
+                matches!(message, DesktopToRelay::MirrorSnapshot { pane_id, messages, .. }
                 if pane_id == "pane-1" && messages.is_empty())
-        }), "旧内容必须通过空快照从移动端撤下");
+            }),
+            "旧内容必须通过空快照从移动端撤下"
+        );
         fixture.sync_codex_panes(&[("pane-1", 7)]);
         fixture.round(&mut MirrorLocator::default(), Instant::now(), locate);
-        assert!(fixture.texts().is_empty(), "另一会话关闭后其最新记录仍可能留在磁盘,不能重新猜测");
-        fixture.host.hook_sessions.lock().insert(7, HookSessionId {
-            agent: Some("codex".into()), session_id: "first".into(),
-        });
+        assert!(
+            fixture.texts().is_empty(),
+            "另一会话关闭后其最新记录仍可能留在磁盘,不能重新猜测"
+        );
+        fixture.host.hook_sessions.lock().insert(
+            7,
+            HookSessionId {
+                agent: Some("codex".into()),
+                session_id: "first".into(),
+            },
+        );
         fixture.round(&mut MirrorLocator::default(), Instant::now(), locate);
-        assert_eq!(fixture.texts(), ["first Codex reply"], "精确身份到达后应恢复镜像");
+        assert_eq!(
+            fixture.texts(),
+            ["first Codex reply"],
+            "精确身份到达后应恢复镜像"
+        );
     }
 
     #[test]
@@ -3186,7 +3283,10 @@ mod tests {
             fixture.sync_codex_panes(&[("pane-1", 7), ("pane-2", 8)]);
             Some((path.clone(), MirrorAgent::Codex))
         });
-        assert!(fixture.texts().is_empty(), "磁盘定位期间出现竞争 pane 后,不得安装旧定位结果");
+        assert!(
+            fixture.texts().is_empty(),
+            "磁盘定位期间出现竞争 pane 后,不得安装旧定位结果"
+        );
         assert_eq!(fixture.bound(), None);
     }
 

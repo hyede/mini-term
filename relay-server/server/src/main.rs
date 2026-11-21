@@ -67,13 +67,14 @@ async fn main() {
     let state = RelayState::new()
         .with_desktop_key(std::env::var("MT_RELAY_DESKTOP_KEY").ok())
         .with_limits(limits);
-    let state_file = std::env::var("RELAY_STATE_FILE").unwrap_or_else(|_| "./relay-data/devices.json".into());
+    let state_file =
+        std::env::var("RELAY_STATE_FILE").unwrap_or_else(|_| "./relay-data/devices.json".into());
     let state = if state_file.trim().is_empty() {
         state
     } else {
-        state.with_state_file(&state_file).unwrap_or_else(|error| {
-            panic!("failed to load relay device authorizations: {error}")
-        })
+        state
+            .with_state_file(&state_file)
+            .unwrap_or_else(|error| panic!("failed to load relay device authorizations: {error}"))
     };
 
     let listener = tokio::net::TcpListener::bind((bind.as_str(), port))
