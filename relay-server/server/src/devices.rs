@@ -455,7 +455,7 @@ impl Registry {
         }
         if serde_json::from_value::<RelayToMobile>(value.clone()).is_err() { return; }
         let message_type = value["type"].as_str().unwrap_or("");
-        if matches!(message_type, "commandReceipt" | "startSessionReceipt" | "mirrorHistory") {
+        if matches!(message_type, "commandReceipt" | "startSessionReceipt" | "mirrorHistory" | "sessionList" | "sessionContent") {
             let field = if message_type == "commandReceipt" { "commandId" } else { "requestId" };
             let route_id = value[field].as_str().map(str::to_owned).or_else(|| {
                 let matches: Vec<_> = self.pending.iter().filter(|(_, pending)| {
@@ -561,9 +561,23 @@ impl Registry {
                         pane_id, command_id, ok: false, reason: Some(CommandFailReason::DesktopOffline),
                     }).unwrap());
                 }
-                MobileToRelay::StartAiSession { request_id, .. } => {
+                MobileToRelay::StartAiSession { request_id, .. }
+                | MobileToRelay::ResumeAiSession { request_id, .. } => {
                     self.send_mobile(credential, &desktop_id, serde_json::to_value(RelayToMobile::StartSessionReceipt {
                         request_id, ok: false, pane_id: None, reason: Some(StartSessionFailReason::DesktopOffline),
+                    }).unwrap());
+                }
+                MobileToRelay::RequestSessionList { request_id, project_id, .. } => {
+                    self.send_mobile(credential, &desktop_id, serde_json::to_value(RelayToMobile::SessionList {
+                        request_id, project_id, sessions: Vec::new(), has_more: false,
+                        reason: Some(StartSessionFailReason::DesktopOffline),
+                    }).unwrap());
+                }
+                MobileToRelay::RequestSessionContent { request_id, project_id, agent, session_id, .. } => {
+                    self.send_mobile(credential, &desktop_id, serde_json::to_value(RelayToMobile::SessionContent {
+                        revision: None,
+                        request_id, project_id, agent, session_id, messages: Vec::new(), has_more: false,
+                        reason: Some(StartSessionFailReason::DesktopOffline),
                     }).unwrap());
                 }
                 _ => {}
@@ -584,7 +598,10 @@ impl Registry {
                 self.controls.insert(key, credential.into());
                 Some(("commandId", command_id.clone(), "commandReceipt", Some(pane_id.clone())))
             }
-            MobileToRelay::StartAiSession { request_id, .. } => Some(("requestId", request_id.clone(), "startSessionReceipt", None)),
+            MobileToRelay::StartAiSession { request_id, .. }
+            | MobileToRelay::ResumeAiSession { request_id, .. } => Some(("requestId", request_id.clone(), "startSessionReceipt", None)),
+            MobileToRelay::RequestSessionList { request_id, .. } => Some(("requestId", request_id.clone(), "sessionList", None)),
+            MobileToRelay::RequestSessionContent { request_id, .. } => Some(("requestId", request_id.clone(), "sessionContent", None)),
             MobileToRelay::RequestMirrorHistory { pane_id, .. } => {
                 if !self.mobiles[credential].subscriptions.contains(pane_id) { return; }
                 Some(("requestId", String::new(), "mirrorHistory", Some(pane_id.clone())))

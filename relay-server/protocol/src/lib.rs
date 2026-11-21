@@ -1,4 +1,4 @@
-//! 中转协议 v3:JSON over WebSocket 的消息类型定义。
+//! 中转协议 v4:JSON over WebSocket 的消息类型定义。
 //!
 //! 命名纪律(见 CONTEXT.md):移动端 / 中转服务器 / 配对 / 对话镜像 / 移动端指令 /
 //! AI 启动器。所有消息经 `#[serde(tag = "type", rename_all_fields = "camelCase")]`
@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 /// 协议版本。两端握手时严格相等校验,不匹配即拒绝(不静默错乱)。
 /// v2:桌面端握手携带共享密钥 + 移动端可发起 AI 会话(docs/adr/0002)。
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -103,6 +103,21 @@ pub enum StartSessionFailReason {
     NotSupported,
     /// 终端创建失败
     SpawnFailed,
+    SessionNotFound,
+    ReadFailed,
+    SessionBusy,
+    SessionChanged,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistorySession {
+    pub id: String,
+    pub agent: String,
+    pub title: String,
+    pub timestamp: String,
+    pub model: Option<String>,
+    pub can_resume: bool,
 }
 
 /// 桌面端握手被拒绝的原因(中转 → 桌面端)。
@@ -183,6 +198,23 @@ pub struct MirrorQuestionOption {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum DesktopToRelay {
+    SessionList {
+        request_id: String,
+        project_id: String,
+        sessions: Vec<HistorySession>,
+        has_more: bool,
+        reason: Option<StartSessionFailReason>,
+    },
+    SessionContent {
+        revision: Option<String>,
+        request_id: String,
+        project_id: String,
+        agent: String,
+        session_id: String,
+        messages: Vec<MirrorMessage>,
+        has_more: bool,
+        reason: Option<StartSessionFailReason>,
+    },
     /// 握手:桌面端连上 WebSocket 后必须发送的第一条消息。
     /// `desktop_key` 是部署方配置在中转上的共享密钥(v2 起必填,不匹配即拒)。
     Hello {
@@ -258,6 +290,26 @@ pub enum DesktopToRelay {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum RelayToDesktop {
+    RequestSessionList {
+        request_id: String,
+        project_id: String,
+        agent: Option<String>,
+        offset: u32,
+    },
+    RequestSessionContent {
+        revision: Option<String>,
+        request_id: String,
+        project_id: String,
+        agent: String,
+        session_id: String,
+        before_seq: Option<u64>,
+    },
+    ResumeAiSession {
+        request_id: String,
+        project_id: String,
+        agent: String,
+        session_id: String,
+    },
     /// 握手成功。
     HelloAck { protocol_version: u32 },
     /// 握手拒绝(版本不匹配 / 密钥不对 / 中转未配置密钥);发送后中转立即关闭连接。
@@ -325,6 +377,26 @@ pub enum RelayToDesktop {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum MobileToRelay {
+    RequestSessionList {
+        request_id: String,
+        project_id: String,
+        agent: Option<String>,
+        offset: u32,
+    },
+    RequestSessionContent {
+        revision: Option<String>,
+        request_id: String,
+        project_id: String,
+        agent: String,
+        session_id: String,
+        before_seq: Option<u64>,
+    },
+    ResumeAiSession {
+        request_id: String,
+        project_id: String,
+        agent: String,
+        session_id: String,
+    },
     /// 握手:二选一携带一次性配对码(扫码首连)或长期凭证(重连)。
     Hello {
         protocol_version: u32,
@@ -385,6 +457,23 @@ pub enum MobileToRelay {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum RelayToMobile {
+    SessionList {
+        request_id: String,
+        project_id: String,
+        sessions: Vec<HistorySession>,
+        has_more: bool,
+        reason: Option<StartSessionFailReason>,
+    },
+    SessionContent {
+        revision: Option<String>,
+        request_id: String,
+        project_id: String,
+        agent: String,
+        session_id: String,
+        messages: Vec<MirrorMessage>,
+        has_more: bool,
+        reason: Option<StartSessionFailReason>,
+    },
     ControlReleased { pane_id: String },
     DesktopList {
         devices: Vec<DesktopDevice>,
@@ -471,9 +560,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn protocol_version_is_v3() {
+    fn historical_sessions_requests_and_responses_round_trip() {
+        for request in [
+            r#"{"type":"requestSessionList","requestId":"list-1","projectId":"p1","agent":null,"offset":0}"#,
+            r#"{"type":"requestSessionContent","requestId":"view-1","projectId":"p1","agent":"codex","sessionId":"s1","beforeSeq":null}"#,
+            r#"{"type":"resumeAiSession","requestId":"resume-1","projectId":"p1","agent":"codex","sessionId":"s1"}"#,
+        ] {
+            let mobile: MobileToRelay = serde_json::from_str(request).unwrap();
+            let desktop: RelayToDesktop = serde_json::from_str(request).unwrap();
+            assert_eq!(
+                serde_json::to_value(mobile).unwrap(),
+                serde_json::to_value(desktop).unwrap()
+            );
+        }
+        for response in [
+            r#"{"type":"sessionList","requestId":"list-1","projectId":"p1","sessions":[],"hasMore":false,"reason":null}"#,
+            r#"{"type":"sessionContent","requestId":"view-1","projectId":"p1","agent":"codex","sessionId":"s1","messages":[],"hasMore":false,"reason":null}"#,
+        ] {
+            let desktop: DesktopToRelay = serde_json::from_str(response).unwrap();
+            let mobile: RelayToMobile = serde_json::from_str(response).unwrap();
+            assert_eq!(
+                serde_json::to_value(desktop).unwrap(),
+                serde_json::to_value(mobile).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn protocol_version_is_v4() {
         // 两端严格相等校验:版本号是唯一的兼容性闸门,改动必须是有意的
-        assert_eq!(PROTOCOL_VERSION, 3);
+        assert_eq!(PROTOCOL_VERSION, 4);
     }
 
     #[test]
@@ -488,7 +604,7 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         assert!(
             json.contains(r#""type":"hello""#)
-                && json.contains(r#""protocolVersion":3"#)
+                && json.contains(r#""protocolVersion":4"#)
                 && json.contains(r#""desktopKey":"s3cret""#),
             "serde camelCase 对齐被破坏: {json}"
         );

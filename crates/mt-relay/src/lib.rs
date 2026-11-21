@@ -13,13 +13,13 @@
 //!
 //! # 边界不变
 //!
-//! - 协议由 `relay-server/protocol` 定义,当前 **v3**;PWA 侧的 TS 类型在
+//! - 协议由 `relay-server/protocol` 定义,当前 **v4**;PWA 侧的 TS 类型在
 //!   `mobile/src/protocol.ts` 手写镜像,两侧字段必须同步维护。多设备改造同步维护
 //!   协议与移动端镜像类型。
 //! - AI 启动器的命令文本从不经过移动端或中转(ADR 0002):
 //!   [`AiLauncher`] 的 `command` / `shell` 只在桌面端进程内流转,
 //!   发出去的 [`MobileLauncher`] 只有 `id` + `name`。
-//! - 协议 v3 要求桌面端、中转与 PWA 同步升级；v2 客户端会被明确拒绝。
+//! - 协议 v4 要求桌面端、中转与 PWA 同步升级；v2 / v3 客户端会被明确拒绝。
 //!   本次修改不会自动部署任何现网中转。
 //! - **镜像绑定红线**:hook 上报过会话身份就只认那一个会话文件;没有身份时,
 //!   只有"确实会写我们认识的会话记录"的 agent(claude / codex / grok / omp / pi / agy)才退

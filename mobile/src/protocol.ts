@@ -1,10 +1,10 @@
 /**
- * 中转协议 v2 的 TypeScript 手写镜像。
+ * 中转协议 v4 的 TypeScript 手写镜像。
  * 与 relay-server/protocol/src/lib.rs 对齐(serde tag="type" + camelCase 字段);
  * 两侧字段增删必须同步维护。
  */
 
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 
 // ── 移动端 → 中转 ──
 
@@ -104,6 +104,9 @@ export interface MobileAnswerQuestion {
 }
 
 export type MobileToRelay =
+  | { type: 'requestSessionList'; requestId: string; projectId: string; agent: string | null; offset: number }
+  | { type: 'requestSessionContent'; requestId: string; projectId: string; agent: string; sessionId: string; beforeSeq: number | null; revision: string | null }
+  | { type: 'resumeAiSession'; requestId: string; projectId: string; agent: string; sessionId: string }
   | MobileSelectDesktop
   | MobileReleaseControl
   | MobileHello
@@ -286,7 +289,11 @@ export type StartSessionFailReason =
   | 'projectNotFound'
   | 'launcherNotFound'
   | 'notSupported'
-  | 'spawnFailed';
+  | 'spawnFailed'
+  | 'sessionNotFound'
+  | 'readFailed'
+  | 'sessionBusy'
+  | 'sessionChanged';
 
 /** 发起回执:ok = pane 已建、启动命令已写入(AI 是否真起来以会话出现在列表为准) */
 export interface MobileStartSessionReceipt {
@@ -298,6 +305,8 @@ export interface MobileStartSessionReceipt {
 }
 
 export type RelayToMobile =
+  | { type: 'sessionList'; requestId: string; projectId: string; sessions: HistorySession[]; hasMore: boolean; reason: StartSessionFailReason | null }
+  | { type: 'sessionContent'; requestId: string; projectId: string; agent: string; sessionId: string; messages: MirrorMessage[]; hasMore: boolean; reason: StartSessionFailReason | null; revision: string | null }
   | { type: 'controlReleased'; paneId: string }
   | MobileDesktopList
   | MobileHelloAck
@@ -312,3 +321,12 @@ export type RelayToMobile =
   | MobilePaneClosed
   | MobileCommandReceipt
   | MobileStartSessionReceipt;
+
+export interface HistorySession {
+  id: string;
+  agent: string;
+  title: string;
+  timestamp: string;
+  model: string | null;
+  canResume: boolean;
+}

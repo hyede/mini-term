@@ -60,7 +60,7 @@ use parking_lot::Mutex;
 use crate::ai::AiBridge;
 use crate::i18n::tr;
 use crate::store::{AppStore, StoreEvent};
-use crate::tree::PaneStatus;
+use crate::tree::{AiSessionRef, PaneState, PaneStatus};
 
 /// 结构同步的去抖(原版 `mobileSessionSync.ts:101` 的 150ms)。
 ///
@@ -98,6 +98,7 @@ pub enum RelaySignal {
 /// `live_ptys` 给 `write_pty` 做预检(见 [`HostImpl::write_pty`])。
 #[derive(Default)]
 struct HostMirror {
+    session_ids: HashMap<u32, HookSessionId>,
     launchers: Vec<mt_relay::AiLauncher>,
     projects: HashMap<String, RelayProject>,
     live_ptys: HashSet<u32>,
@@ -139,6 +140,19 @@ fn to_relay_project(p: &ProjectConfig) -> RelayProject {
         path: p.path.clone(),
         ssh_connection_id: p.ssh_connection_id.clone(),
     }
+}
+
+fn resume_pane_matches(pane: &PaneState, agent: &str, session_id: &str, pending: bool) -> bool {
+    let agent_kind = mt_ai::AgentKind::parse(agent);
+    pane.pty_id.is_some()
+        && pane.status != PaneStatus::Error
+        && pane.ai_session.as_ref().is_some_and(|session| {
+            session.session_id == session_id
+                && agent_kind.is_some()
+                && mt_ai::AgentKind::parse(session.agent.as_deref().unwrap_or("claude"))
+                    == agent_kind
+        })
+        && (pending || matches!(pane.status, PaneStatus::AiIdle | PaneStatus::AiWorking))
 }
 
 struct HostImpl {
@@ -184,6 +198,7 @@ impl RelayHost for HostImpl {
 
     fn hook_session(&self, pty_id: u32) -> Option<HookSessionId> {
         self.ai.perception().hooks().session_of(pty_id)
+            .or_else(|| self.mirror.lock().session_ids.get(&pty_id).cloned())
     }
 
     /// **如实**返回输入检测到的 agent 名(坑 3)。
@@ -581,6 +596,7 @@ pub fn bridge(cx: &App) -> Option<Entity<RelayBridge>> {
 }
 
 pub struct RelayBridge {
+    resume_attempts: HashMap<(String, String, String), (String, bool)>,
     manager: Arc<MobileRelayManager>,
     store: Entity<AppStore>,
     mirror: Arc<Mutex<HostMirror>>,
@@ -724,6 +740,51 @@ impl RelayBridge {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(String, futures::channel::oneshot::Receiver<bool>), StartSessionFailReason> {
+        if let Some(resume) = &payload.resume {
+            let store = self.store.read(cx);
+            let project = store
+                .project(&payload.project_id)
+                .ok_or(StartSessionFailReason::ProjectNotFound)?;
+            if project.path != resume.project_path
+                || !mt_relay::can_start_session(&project.path, project.ssh_connection_id.as_deref())
+            {
+                return Err(StartSessionFailReason::NotSupported);
+            }
+            let existing = store
+                .projects()
+                .iter()
+                .filter(|project| {
+                    mt_relay::can_start_session(&project.path, project.ssh_connection_id.as_deref())
+                })
+                .find_map(|project| {
+                    let key = (
+                        project.id.clone(),
+                        resume.agent.clone(),
+                        resume.session_id.clone(),
+                    );
+                    store
+                        .project_state(&project.id)?
+                        .all_panes()
+                        .into_iter()
+                        .find(|pane| {
+                            let pending = self
+                                .resume_attempts
+                                .get(&key)
+                                .is_some_and(|(id, was_live)| id == &pane.id && !was_live);
+                            resume_pane_matches(pane, &resume.agent, &resume.session_id, pending)
+                        })
+                        .map(|pane| (pane.id.clone(), pane.pty_id.unwrap()))
+                });
+            if let Some((pane_id, pty_id)) = existing {
+                let spawned = self
+                    .store
+                    .update(cx, |store, cx| store.pane_spawn_settled(pty_id, cx));
+                return Ok((pane_id, spawned));
+            }
+            if store.unidentified_ai_panes(&payload.project_id, &resume.agent) > 0 {
+                return Err(StartSessionFailReason::SessionBusy);
+            }
+        }
         // 1. 项目还在吗。mt-relay 侧已经校验过一遍,但从校验到执行之间用户
         //    可能刚好把项目移除了,所以 ProjectNotFound 这一档必须保留
         let shell = {
@@ -740,6 +801,11 @@ impl RelayBridge {
         };
 
         // 4~7. 建 PTY + 建 pane + 挂进最左侧叶子末尾(不激活、不抢焦点、不切项目)。
+        if let Some(resume) = &payload.resume
+            && crate::kitty_graphics::is_wsl_launch(&resume.project_path, &shell.command)
+        {
+            return Err(StartSessionFailReason::NotSupported);
+        }
         //      customTitle 用启动器名:回到电脑前一眼看出这个标签是什么。
         let pane_id = self
             .store
@@ -748,6 +814,10 @@ impl RelayBridge {
                     &payload.project_id,
                     shell,
                     Some(payload.launcher_name.clone()),
+                    payload
+                        .resume
+                        .as_ref()
+                        .and_then(|resume| resume.cwd.clone()),
                     window,
                     cx,
                 )
@@ -778,6 +848,28 @@ impl RelayBridge {
         let Some(spawned) = spawned.filter(|_| written) else {
             return Err(StartSessionFailReason::SpawnFailed);
         };
+        if let Some(resume) = &payload.resume {
+            self.store.update(cx, |store, cx| {
+                store.set_pane_ai_session(
+                    &payload.project_id,
+                    &pane_id,
+                    AiSessionRef {
+                        agent: Some(resume.agent.clone()),
+                        session_id: resume.session_id.clone(),
+                        cwd: resume.cwd.clone(),
+                    },
+                    cx,
+                )
+            });
+            self.resume_attempts.insert(
+                (
+                    payload.project_id.clone(),
+                    resume.agent.clone(),
+                    resume.session_id.clone(),
+                ),
+                (pane_id.clone(), false),
+            );
+        }
         // 9. 审计 toast 与成功回执在调用方等到 PTY 起来之后再发
         Ok((pane_id, spawned))
     }
@@ -818,6 +910,23 @@ impl RelayBridge {
     /// 刷新 [`RelayHost`] 用的镜像快照(主线程写,tokio 线程读)。
     fn refresh_mirror(&mut self, cx: &mut Context<Self>) {
         let store = self.store.read(cx);
+        self.resume_attempts
+            .retain(|(project_id, _, _), (pane_id, was_live)| {
+                let Some(pane) = store
+                    .project_state(project_id)
+                    .and_then(|state| state.pane(pane_id))
+                else {
+                    return false;
+                };
+                if pane.pty_id.is_none() || pane.status == PaneStatus::Error {
+                    return false;
+                }
+                if matches!(pane.status, PaneStatus::AiIdle | PaneStatus::AiWorking) {
+                    *was_live = true;
+                }
+                !*was_live || pane.status != PaneStatus::Idle
+            });
+        let mut session_ids = HashMap::new();
         let launchers = store
             .mobile_relay()
             .launchers
@@ -830,6 +939,20 @@ impl RelayBridge {
             projects.insert(project.id.clone(), to_relay_project(project));
             if let Some(state) = store.project_state(&project.id) {
                 live_ptys.extend(state.pty_ids());
+                for pane in state.all_panes() {
+                    if matches!(pane.status, PaneStatus::AiIdle | PaneStatus::AiWorking)
+                        && let (Some(pty_id), Some(session)) =
+                            (pane.pty_id, pane.ai_session.as_ref())
+                    {
+                        session_ids.insert(
+                            pty_id,
+                            HookSessionId {
+                                agent: session.agent.clone(),
+                                session_id: session.session_id.clone(),
+                            },
+                        );
+                    }
+                }
             }
         }
         let emulators = live_ptys
@@ -837,6 +960,7 @@ impl RelayBridge {
             .filter_map(|&pty_id| Some((pty_id, store.terminal(pty_id)?.read(cx).emulator())))
             .collect();
         *self.mirror.lock() = HostMirror {
+            session_ids,
             launchers,
             projects,
             live_ptys,
@@ -948,6 +1072,7 @@ pub fn install(store: Entity<AppStore>, window: &mut Window, cx: &mut App) -> En
             }
         });
         RelayBridge {
+            resume_attempts: HashMap::new(),
             manager: manager.clone(),
             store: store.clone(),
             mirror,
@@ -982,6 +1107,40 @@ pub fn install(store: Entity<AppStore>, window: &mut Window, cx: &mut App) -> En
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resume_matches_exact_agent_and_session_without_reusing_dead_or_exited_panes() {
+        let mut pane = PaneState::new("shell");
+        pane.pty_id = Some(7);
+        pane.ai_session = Some(AiSessionRef {
+            agent: Some("codex".into()),
+            session_id: "session-1".into(),
+            cwd: None,
+        });
+        pane.status = PaneStatus::AiWorking;
+        assert!(resume_pane_matches(&pane, "codex", "session-1", false));
+        assert!(!resume_pane_matches(&pane, "claude", "session-1", false));
+        assert!(!resume_pane_matches(&pane, "codex", "session-2", false));
+        pane.status = PaneStatus::Idle;
+        assert!(!resume_pane_matches(&pane, "codex", "session-1", false));
+        assert!(resume_pane_matches(&pane, "codex", "session-1", true));
+        pane.status = PaneStatus::Error;
+        assert!(!resume_pane_matches(&pane, "codex", "session-1", true));
+        pane.status = PaneStatus::AiIdle;
+        pane.pty_id = None;
+        assert!(!resume_pane_matches(&pane, "codex", "session-1", false));
+        pane.pty_id = Some(7);
+        pane.ai_session.as_mut().unwrap().agent = Some("claude-code".into());
+        assert!(resume_pane_matches(&pane, "claude", "session-1", false));
+        pane.ai_session.as_mut().unwrap().agent = None;
+        assert!(resume_pane_matches(&pane, "claude", "session-1", false));
+        assert!(!resume_pane_matches(
+            &pane,
+            "unknown-agent",
+            "session-1",
+            false
+        ));
+    }
     use mt_config::{ProjectGroup, ProjectTreeItem};
 
     fn project(id: &str, name: &str) -> ProjectConfig {

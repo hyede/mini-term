@@ -315,6 +315,48 @@ body {
   min-height: 0;
 }
 
+.session-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 16px;
+  padding: 4px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: var(--bg-surface);
+}
+
+.session-tabs button {
+  flex: 1;
+  padding: 12px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.session-tabs button[aria-selected="true"] {
+  background: var(--bg-base);
+  color: var(--accent);
+}
+
+.history-list { padding-bottom: 80px; }
+.history-filters { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; }
+.history-filters label { flex: 1; min-width: 120px; display: flex; flex-direction: column; gap: 8px; color: var(--text-secondary); font-size: 13px; }
+.history-filters select { width: 100%; padding: 10px; border: 1px solid var(--border-subtle); border-radius: 8px; background: var(--bg-surface); color: var(--text-primary); font: inherit; font-size: 16px; }
+.history-action { padding: 10px 12px; border: 1px solid var(--border-subtle); border-radius: 8px; background: var(--bg-surface); color: var(--accent); font: inherit; font-size: 14px; cursor: pointer; flex-shrink: 0; }
+.history-hint { padding: 12px 0; color: var(--text-secondary); font-size: 13px; line-height: 1.6; }
+.history-error { padding: 12px 0; color: var(--color-error); font-size: 13px; line-height: 1.6; }
+.history-row { display: flex; flex-direction: column; width: 100%; gap: 10px; margin: 10px 0; padding: 16px; border: 1px solid var(--border-subtle); border-radius: 12px; background: var(--bg-surface); color: var(--text-primary); text-align: left; font: inherit; cursor: pointer; }
+.history-row-title { font-size: 15px; line-height: 1.5; overflow-wrap: anywhere; }
+.history-row-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; color: var(--text-secondary); font-size: 12px; overflow-wrap: anywhere; }
+.history-footer { padding: 10px 16px calc(env(safe-area-inset-bottom, 0px) + 16px); border-top: 1px solid var(--border-subtle); background: var(--bg-surface); }
+.history-footer .rename-confirm { width: 100%; min-height: 44px; }
+.history-view h2.mirror-title { cursor: default; }
+.history-view button:disabled, .history-list button:disabled, .session-tabs button:disabled { opacity: 0.5; cursor: default; }
+.history-list button:focus-visible, .history-view button:focus-visible, .session-tabs button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
 .mirror-header {
   display: flex;
   align-items: center;

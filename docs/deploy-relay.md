@@ -155,7 +155,7 @@ Things to keep in mind:
 - Log spot-check: `docker logs mini-term-relay` should show only connection / auth / pairing metadata, never any conversation content.
 
 
-## 6. Personal multi-device mode (protocol v3)
+## 6. Personal multi-device mode (protocol v4)
 
 One relay process serves one personal device group with N desktops and N phones. This is not an account system or a multi-tenant deployment. Desktops connect outbound to the same relay; terminals and AI processes stay on their respective computers.
 
@@ -163,6 +163,16 @@ Each desktop uses the same group admission key plus an independently generated, 
 
 Pair each phone separately. Pairing explicitly grants access to every current and future desktop in the group and does not revoke other phones. The phone's desktop selector scopes projects, mirrors, commands and replies. Multiple phones can view a mirror; the first writer owns terminal control until it releases control, leaves the mirror, switches desktops or disconnects. Local desktop keyboard input is not restricted. The desktop Mobile panel can revoke one phone; resetting pairing revokes all phones.
 
+When several AI sessions run in the same project, mirrors require a Hook session identity for each pane. Enable Hook and register the corresponding CLI in desktop settings, then restart or resume each session. Without an identity, mirrors no longer guess from the project's newest transcript: cached content is cleared and an empty-record hint is shown. Closing other panes does not restore guessing for the same AI session. Single-pane fallback without Hook remains available.
+
 RELAY_STATE_FILE defaults to ./relay-data/devices.json. An empty value disables persistence explicitly. Compose mounts a dedicated authorization volume, so rebuilding preserves pairing; docker compose down -v deletes that volume. Authorization files contain secrets: Unix files are created as 0600, and Windows directory ACLs must protect them. Backups must remain private. Pairing codes, subscriptions, connections and pending reply routes remain memory-only; message bodies are never persisted.
 
-Do not share the state file between multiple relay processes or randomly load-balance WebSocket connections: this is a single-process relay, not a multi-replica cluster. Existing global/per-IP connection limits still apply. Upgrade desktop, relay and PWA together to protocol v3; v2 is rejected. Initial migration from v2 requires fresh pairing because old grants were volatile. No live deployment is performed by this source change. TLS is not end-to-end encryption; trust the relay host.
+Do not share the state file between multiple relay processes or randomly load-balance WebSocket connections: this is a single-process relay, not a multi-replica cluster. Existing global/per-IP connection limits still apply. Upgrade desktop, relay and PWA together to protocol v4; v2 / v3 are rejected. Initial migration from v2 requires fresh pairing because old grants were volatile; retaining the authorization volume preserves pairing when upgrading from v3. No live deployment is performed by this source change. TLS is not end-to-end encryption; trust the relay host.
+
+## 7. Session history and continuation
+
+The phone home screen switches between Active and History. Filter saved sessions by local project and AI type, then page through read-only conversation records. Continue session enters the writable live mirror. SSH / WSL records and restoration through a WSL shell are not supported yet.
+
+Reading and continuation require an online desktop. The desktop reads the records; the relay only forwards them and never persists conversation bodies. Continuation sends project and session identities, not a shell command; the desktop generates the command and rechecks project ownership. Known running sessions open directly. An unconfirmed start reuses its terminal rather than replaying the command; unidentified running sessions require desktop confirmation. Record rewrites or branch changes require a refresh before further pagination.
+
+Continuation does not take desktop focus. A successful receipt means the terminal started and the command was written, not that the CLI authenticated or resumed successfully. The phone waits for the active session; on timeout, check the desktop. It never retries automatically or closes the terminal.

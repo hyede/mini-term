@@ -1,6 +1,6 @@
 import { selectDesktop, useRelayStore } from './relay';
 import { useI18nStore, useT } from './i18n';
-import { SessionList } from './SessionList';
+import { HistoryView, SessionList } from './SessionList';
 import { MirrorView } from './MirrorView';
 
 function LanguageToggle() {
@@ -34,6 +34,7 @@ export function App() {
   const phase = useRelayStore((s) => s.phase);
   const rejectReason = useRelayStore((s) => s.rejectReason);
   const mirrorOpen = useRelayStore((s) => s.mirror !== null);
+  const historyOpen = useRelayStore((s) => s.historyView !== null);
   const devices = useRelayStore((s) => s.devices);
   const selectedDesktopId = useRelayStore((s) => s.selectedDesktopId);
   const switchingDisabled = useRelayStore((s) => !!s.mirror?.pendingCommandId || !!s.starting);
@@ -53,7 +54,7 @@ export function App() {
       body = <StatusScreen icon="◌" title={t('pair.reconnecting')} spinning />;
       break;
     case 'connected':
-      body = mirrorOpen ? <MirrorView /> : <SessionList />;
+      body = mirrorOpen ? <MirrorView /> : historyOpen ? <HistoryView /> : <SessionList />;
       break;
     case 'revoked':
       body = <StatusScreen icon="⊘" title={t('pair.revoked')} hint={t('pair.revokedHint')} />;

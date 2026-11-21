@@ -20,6 +20,10 @@ export const start = {
       launcherNotFound: "该启动器已被删除",
       notSupported: "该项目不支持远程新建会话",
       spawnFailed: "桌面端创建终端失败",
+      sessionNotFound: "该会话已不存在或不属于当前项目，请刷新列表",
+      readFailed: "读取会话失败，请重试或到桌面查看",
+      sessionBusy: "存在身份尚未确认的运行中会话，请到桌面确认，避免重复启动",
+      sessionChanged: "会话记录已变化，请刷新后重试",
     },
   },
   en: {
@@ -43,6 +47,10 @@ export const start = {
       launcherNotFound: "That launcher has been deleted",
       notSupported: "This project can't start sessions remotely",
       spawnFailed: "The desktop failed to create a terminal",
+      sessionNotFound: "The session is missing or belongs to another project. Refresh the list.",
+      readFailed: "Could not read the session. Retry or check your desktop.",
+      sessionBusy: "A running session has no confirmed identity. Check the desktop to avoid starting a duplicate.",
+      sessionChanged: "The session record has changed. Refresh and retry.",
     },
   },
 } as const;

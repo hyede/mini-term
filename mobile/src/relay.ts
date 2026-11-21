@@ -21,6 +21,7 @@ import {
   type MobileToRelay,
   type RelayToMobile,
   type StartSessionFailReason,
+  type HistorySession,
 } from './protocol';
 
 const CRED_KEY = 'mt-mobile-credential';
@@ -96,7 +97,36 @@ export interface StartSessionState {
   paneId: string | null;
 }
 
+type HistoryError = StartSessionFailReason | 'timeout';
+
+export interface HistoryListState {
+  projectId: string;
+  agent: string | null;
+  sessions: HistorySession[];
+  offset: number;
+  requestId: string | null;
+  append: boolean;
+  loading: boolean;
+  hasMore: boolean;
+  error: HistoryError | null;
+}
+
+export interface HistoryViewState {
+  revision: string | null;
+  projectId: string;
+  session: HistorySession;
+  messages: MirrorMessage[];
+  requestId: string | null;
+  append: boolean;
+  loading: boolean;
+  hasMore: boolean;
+  error: HistoryError | null;
+}
+
 interface RelayStore {
+  sessionTab: 'active' | 'history';
+  historyList: HistoryListState | null;
+  historyView: HistoryViewState | null;
   devices: DesktopDevice[];
   selectedDesktopId: string | null;
   phase: Phase;
@@ -116,6 +146,9 @@ interface RelayStore {
 }
 
 export const useRelayStore = create<RelayStore>(() => ({
+  sessionTab: 'active',
+  historyList: null,
+  historyView: null,
   devices: [],
   selectedDesktopId: selectedDesktop() ?? null,
   phase: 'idle',
@@ -129,6 +162,7 @@ export const useRelayStore = create<RelayStore>(() => ({
 }));
 
 function setPhase(phase: Phase, rejectReason: MobileRejectReason | null = null) {
+  if (phase !== 'connected') cancelHistoryRequests('desktopOffline');
   useRelayStore.setState({ phase, rejectReason });
 }
 
@@ -271,6 +305,7 @@ function connect(auth: { pairingCode?: string; credential?: string; staleCode?: 
         if (previous !== msg.selectedDesktopId) {
           finishStart(null);
           snapshotReady = false;
+          clearHistory();
           useRelayStore.setState({ projects: [], launchers: [], mirror: null, desktopOnline: null });
         }
         useRelayStore.setState({ devices: msg.devices, selectedDesktopId: msg.selectedDesktopId });
@@ -312,15 +347,48 @@ function connect(auth: { pairingCode?: string; credential?: string; staleCode?: 
       case 'revoked':
         stopped = true;
         clearCredential();
+        clearHistory();
         setPhase('revoked');
         break;
       case 'presence':
         useRelayStore.setState({ desktopOnline: msg.desktopOnline });
+        if (!msg.desktopOnline) cancelHistoryRequests('desktopOffline');
         // 桌面端在等待期间掉线:这次发起再也不会有下文,立刻给出原因而不是等超时
         if (!msg.desktopOnline && useRelayStore.getState().starting) {
           finishStart('desktopOffline');
         }
         break;
+      case 'sessionList': {
+        const history = useRelayStore.getState().historyList;
+        if (!history || history.requestId !== msg.requestId || history.projectId !== msg.projectId) break;
+        if (historyListTimer) clearTimeout(historyListTimer);
+        historyListTimer = null;
+        const sessions = history.append ? [...history.sessions, ...msg.sessions] : msg.sessions;
+        const unique = new Map(sessions.map((session) => [JSON.stringify([session.agent, session.id]), session]));
+        useRelayStore.setState({ historyList: {
+          ...history, requestId: null, loading: false, error: msg.reason,
+          sessions: msg.reason ? history.sessions : [...unique.values()],
+          offset: msg.reason ? history.offset : (history.append ? history.offset : 0) + msg.sessions.length,
+          hasMore: msg.reason ? history.hasMore : msg.hasMore,
+        } });
+        break;
+      }
+      case 'sessionContent': {
+        const view = useRelayStore.getState().historyView;
+        if (!view || view.requestId !== msg.requestId || view.projectId !== msg.projectId
+            || view.session.id !== msg.sessionId || view.session.agent !== msg.agent) break;
+        if (historyContentTimer) clearTimeout(historyContentTimer);
+        historyContentTimer = null;
+        const messages = view.append ? [...msg.messages, ...view.messages] : msg.messages;
+        const unique = new Map(messages.map((message) => [message.seq, message]));
+        useRelayStore.setState({ historyView: {
+          ...view, requestId: null, loading: false, error: msg.reason,
+          revision: msg.reason ? view.revision : msg.revision,
+          messages: msg.reason ? view.messages : [...unique.values()].sort((left, right) => left.seq - right.seq),
+          hasMore: msg.reason ? view.hasMore : msg.hasMore,
+        } });
+        break;
+      }
       case 'sessionsSnapshot':
         useRelayStore.setState({
           projects: msg.projects,
@@ -456,11 +524,14 @@ function connect(auth: { pairingCode?: string; credential?: string; staleCode?: 
 export function sendToRelay(msg: MobileToRelay) {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(msg));
+    return true;
   }
+  return false;
 }
 
 /** 进入某 pane 的对话镜像:登记视图状态并向桌面端订阅。 */
 export function openMirror(paneId: string, title: string) {
+  closeHistoryView();
   useRelayStore.setState({
     mirror: {
       paneId,
@@ -569,6 +640,7 @@ export function selectDesktop(desktopId: string) {
   if (state.phase !== 'connected' || state.selectedDesktopId === desktopId
       || state.mirror?.pendingCommandId || state.starting) return;
   closeMirror();
+  clearHistory();
   pendingSelection = desktopId;
   pendingPaneId = null;
   snapshotReady = false;
@@ -666,6 +738,118 @@ export function clearStartError() {
   if (useRelayStore.getState().startError) {
     useRelayStore.setState({ startError: null });
   }
+}
+
+let historyListTimer: ReturnType<typeof setTimeout> | null = null;
+let historyContentTimer: ReturnType<typeof setTimeout> | null = null;
+
+function cancelHistoryRequests(error: HistoryError) {
+  if (historyListTimer) clearTimeout(historyListTimer);
+  if (historyContentTimer) clearTimeout(historyContentTimer);
+  historyListTimer = null;
+  historyContentTimer = null;
+  const { historyList, historyView } = useRelayStore.getState();
+  useRelayStore.setState({
+    historyList: historyList?.loading ? { ...historyList, loading: false, requestId: null, error } : historyList,
+    historyView: historyView?.loading ? { ...historyView, loading: false, requestId: null, error } : historyView,
+  });
+}
+
+function clearHistory() {
+  cancelHistoryRequests('desktopOffline');
+  useRelayStore.setState({ historyList: null, historyView: null });
+}
+
+export function setSessionTab(sessionTab: 'active' | 'history') {
+  useRelayStore.setState({ sessionTab });
+}
+
+export function loadSessionHistory(projectId: string, agent: string | null, append = false): boolean {
+  const { phase, desktopOnline, historyList, projects } = useRelayStore.getState();
+  if (phase !== 'connected' || desktopOnline !== true
+      || !projects.some((project) => project.projectId === projectId && project.canStartSession)) return false;
+  if (!append && historyList?.loading && historyList.projectId === projectId && historyList.agent === agent) return false;
+  if (append && (!historyList || historyList.loading || !historyList.hasMore
+      || historyList.projectId !== projectId || historyList.agent !== agent)) return false;
+  const requestId = crypto.randomUUID();
+  const previous = append ? historyList : null;
+  useRelayStore.setState({ historyList: {
+    projectId, agent, sessions: previous?.sessions ?? [], offset: previous?.offset ?? 0,
+    requestId, append, loading: true, hasMore: previous?.hasMore ?? false, error: null,
+  } });
+  if (historyListTimer) clearTimeout(historyListTimer);
+  historyListTimer = setTimeout(() => {
+    const current = useRelayStore.getState().historyList;
+    if (current?.requestId === requestId) {
+      useRelayStore.setState({ historyList: { ...current, requestId: null, loading: false, error: 'timeout' } });
+    }
+    historyListTimer = null;
+  }, START_SESSION_TIMEOUT_MS);
+  if (!sendToRelay({ type: 'requestSessionList', requestId, projectId, agent, offset: previous?.offset ?? 0 })) {
+    cancelHistoryRequests('desktopOffline');
+    return false;
+  }
+  return true;
+}
+
+export function openHistorySession(projectId: string, session: HistorySession) {
+  closeHistoryView();
+  clearStartError();
+  useRelayStore.setState({ historyView: {
+    revision: null,
+    projectId, session, messages: [], requestId: null, append: false, loading: false, hasMore: false, error: null,
+  } });
+  loadSessionContent();
+}
+
+export function closeHistoryView() {
+  if (historyContentTimer) clearTimeout(historyContentTimer);
+  historyContentTimer = null;
+  useRelayStore.setState({ historyView: null });
+}
+
+export function loadSessionContent(append = false): boolean {
+  const { phase, desktopOnline, historyView } = useRelayStore.getState();
+  if (!historyView || historyView.loading || phase !== 'connected' || desktopOnline !== true) return false;
+  if (append && (!historyView.hasMore || historyView.messages.length === 0)) return false;
+  const requestId = crypto.randomUUID();
+  const { projectId, session } = historyView;
+  useRelayStore.setState({ historyView: { ...historyView, requestId, append, loading: true, error: null } });
+  if (historyContentTimer) clearTimeout(historyContentTimer);
+  historyContentTimer = setTimeout(() => {
+    const current = useRelayStore.getState().historyView;
+    if (current?.requestId === requestId) {
+      useRelayStore.setState({ historyView: { ...current, requestId: null, loading: false, error: 'timeout' } });
+    }
+    historyContentTimer = null;
+  }, START_SESSION_TIMEOUT_MS);
+  if (!sendToRelay({
+    type: 'requestSessionContent', requestId, projectId, agent: session.agent, sessionId: session.id,
+    beforeSeq: append ? historyView.messages[0].seq : null,
+    revision: append ? historyView.revision : null,
+  })) {
+    cancelHistoryRequests('desktopOffline');
+    return false;
+  }
+  return true;
+}
+
+export function resumeHistorySession(): boolean {
+  const { historyView, phase, desktopOnline, starting, projects } = useRelayStore.getState();
+  if (!historyView?.session.canResume || starting || phase !== 'connected' || desktopOnline !== true) return false;
+  const project = projects.find((project) => project.projectId === historyView.projectId);
+  if (!project?.canStartSession) return false;
+  const requestId = crypto.randomUUID();
+  useRelayStore.setState({ starting: { requestId, projectName: project.name, paneId: null }, startError: null });
+  armStartTimeout(requestId);
+  if (!sendToRelay({
+    type: 'resumeAiSession', requestId, projectId: project.projectId,
+    agent: historyView.session.agent, sessionId: historyView.session.id,
+  })) {
+    finishStart('desktopOffline');
+    return false;
+  }
+  return true;
 }
 
 /** 上拉加载更早历史(以当前最早消息的 seq 为锚)。 */

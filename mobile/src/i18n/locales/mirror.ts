@@ -5,7 +5,7 @@ export const mirror = {
     backToList: "返回列表",
     loading: "加载中…",
     loadOlder: "加载更早的消息",
-    empty: "该会话暂无消息记录",
+    empty: "暂无可确认的会话记录。同一项目开启多个 AI 会话时，请在桌面端开启并注册 AI Hook，重新启动或恢复各会话后再查看。",
     paneClosed: "该 AI 会话已结束或 pane 已关闭",
     source: {
       desktop: "桌面输入",
@@ -58,7 +58,7 @@ export const mirror = {
     backToList: "Back to list",
     loading: "Loading…",
     loadOlder: "Load earlier messages",
-    empty: "No messages recorded for this session yet",
+    empty: "No confirmed session messages yet. For multiple AI sessions in one project, enable and register AI Hook on the desktop, then restart or resume each session.",
     paneClosed: "This AI session has ended or the pane was closed",
     source: {
       desktop: "Desktop input",

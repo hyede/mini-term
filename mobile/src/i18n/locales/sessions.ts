@@ -1,5 +1,22 @@
 export const sessions = {
   zh: {
+    history: {
+      tabs: "会话列表", active: "活跃会话", title: "历史会话", project: "项目", agent: "AI 类型",
+      allAgents: "全部类型", refresh: "刷新", localOnly: "仅显示本机会话记录，暂不支持 SSH / WSL。",
+      noProjects: "暂无可用的本地项目", loading: "正在读取会话…", empty: "该项目暂无历史会话",
+      more: "加载更多会话", untitled: "未命名会话", back: "返回", user: "用户", tool: "工具",
+      emptyContent: "暂无可显示的会话内容", resume: "继续会话", resuming: "正在继续会话…",
+      resumeHint: "运行中的会话直接进入；已关闭的会话由桌面新开终端恢复，不抢桌面焦点。",
+      resumeUnsupported: "该会话暂不支持恢复，可以查看记录。",
+      error: {
+        desktopOffline: "桌面端离线，请恢复连接后重试", projectNotFound: "该项目已不存在",
+        launcherNotFound: "启动器已不存在", notSupported: "暂不支持该项目或会话类型",
+        spawnFailed: "桌面端创建终端失败", sessionNotFound: "该会话已不存在或不属于当前项目，请刷新列表",
+        readFailed: "读取失败或会话过大，请重试或到桌面查看", timeout: "读取超时，请重试",
+        sessionBusy: "存在身份尚未确认的运行中会话，请到桌面确认后再继续",
+        sessionChanged: "会话记录已变化，请刷新后重新查看",
+      },
+    },
     title: "活跃 AI 会话",
     empty: "当前没有活跃的 AI 会话",
     emptyHint: "在桌面端 mini-term 的终端里启动 Claude / Codex 后，对应 pane 会实时出现在这里。",
@@ -24,6 +41,23 @@ export const sessions = {
     },
   },
   en: {
+    history: {
+      tabs: "Session lists", active: "Active", title: "History", project: "Project", agent: "AI type",
+      allAgents: "All types", refresh: "Refresh", localOnly: "Local session records only. SSH / WSL are not supported yet.",
+      noProjects: "No local projects available", loading: "Loading sessions…", empty: "No session history for this project",
+      more: "Load more sessions", untitled: "Untitled session", back: "Back", user: "User", tool: "Tool",
+      emptyContent: "No conversation content available", resume: "Continue session", resuming: "Continuing session…",
+      resumeHint: "Open running sessions directly; restore closed sessions in a new desktop terminal without taking focus.",
+      resumeUnsupported: "This session can be viewed but cannot be resumed yet.",
+      error: {
+        desktopOffline: "Desktop offline. Reconnect and retry.", projectNotFound: "This project no longer exists.",
+        launcherNotFound: "The launcher no longer exists.", notSupported: "This project or session type is not supported yet.",
+        spawnFailed: "The desktop failed to create a terminal.", sessionNotFound: "This session is missing or belongs to another project. Refresh the list.",
+        readFailed: "Reading failed or the session is too large. Retry or view it on the desktop.", timeout: "Reading timed out. Please retry.",
+        sessionBusy: "A running session has no confirmed identity. Check the desktop before continuing.",
+        sessionChanged: "The session record has changed. Refresh to reload it.",
+      },
+    },
     title: "Active AI Sessions",
     empty: "No active AI sessions",
     emptyHint: "Start Claude / Codex in a desktop mini-term terminal and the pane will appear here in real time.",

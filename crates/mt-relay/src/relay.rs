@@ -9,13 +9,14 @@ use std::time::{Duration, Instant, SystemTime};
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use futures_util::{SinkExt, StreamExt};
 use mt_relay_protocol::{
     CommandFailReason, DesktopRejectReason, DesktopToRelay, MirrorMessage, MobileLauncher,
-    MobilePane, MobileProject, RelayToDesktop, StartSessionFailReason, PROTOCOL_VERSION,
+    HistorySession, MobilePane, MobileProject, RelayToDesktop, StartSessionFailReason, PROTOCOL_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -24,6 +25,9 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::host::{AiLauncher, RelayEvents, RelayHost};
 use crate::mirror::{self, MIRROR_PAGE_SIZE, MirrorAgent, MirrorParser, history_slice};
 use crate::util::is_wsl_unc_path;
+
+const HISTORY_PAGE_SIZE: usize = 50;
+const HISTORY_PAGE_BYTES: usize = 4 << 20;
 
 /// 握手 ack 等待超时。
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -108,6 +112,7 @@ struct MirrorRuntime {
 /// 重新定位(hook 上报了新身份、AI 换了一轮、PTY 换了),时机与原来每轮都定位一致。
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum LocateKey {
+    Ambiguous,
     /// hook 上报过会话身份:按身份精确定位
     Hook {
         pty_id: u32,
@@ -152,7 +157,7 @@ impl MirrorLocator {
             // 或被截断清掉了运行态,才每轮再找(与原来同一节奏)
             LocateKey::Hook { .. } => resolved.is_none() || resolved != bound,
             // 结果恒为 None,输入没变就不必再算
-            LocateKey::NoLog { .. } => false,
+            LocateKey::Ambiguous | LocateKey::NoLog { .. } => false,
             LocateKey::Heuristic { .. } => {
                 let elapsed = self
                     .at
@@ -183,7 +188,7 @@ fn locate_session_file(project_path: &str, key: &LocateKey) -> Option<(PathBuf, 
         LocateKey::Hook {
             agent, session_id, ..
         } => mirror::resolve_session_file_by_id(project_path, agent.as_deref(), session_id),
-        LocateKey::NoLog { .. } => None,
+        LocateKey::Ambiguous | LocateKey::NoLog { .. } => None,
         LocateKey::Heuristic { started, .. } => {
             mirror::resolve_session_file(project_path, *started)
         }
@@ -323,6 +328,7 @@ fn find_mobile_cmd(
 
 /// 当前连接会话的取消句柄;整个 manager 由上层用 `Arc` 长期持有。
 pub struct MobileRelayManager {
+    history_slots: Arc<tokio::sync::Semaphore>,
     identity: Mutex<Option<crate::device::DeviceIdentity>>,
     paired_devices: Mutex<Vec<mt_relay_protocol::PairedMobile>>,
     cancel: Mutex<Option<watch::Sender<bool>>>,
@@ -337,6 +343,7 @@ pub struct MobileRelayManager {
     pane_paths: Mutex<HashMap<String, String>>,
     /// pane → PTY id(移动端指令写穿目标)
     pane_ptys: Mutex<HashMap<String, u32>>,
+    ambiguous_mirrors: Mutex<HashMap<u32, LocateKey>>,
     /// 已订阅镜像的 pane 集合
     mirror_subs: Mutex<HashMap<String, MirrorSub>>,
     /// 每 pane 最近成功写入的移动端指令原文:会话记录回流时把匹配的
@@ -361,6 +368,7 @@ impl MobileRelayManager {
     /// [`apply`]: MobileRelayManager::apply
     pub fn new(host: Arc<dyn RelayHost>, events: Arc<dyn RelayEvents>) -> Self {
         Self {
+            history_slots: Arc::new(tokio::sync::Semaphore::new(2)),
             identity: Mutex::new(Some(crate::device::DeviceIdentity::new())),
             paired_devices: Mutex::new(Vec::new()),
             cancel: Mutex::new(None),
@@ -370,6 +378,7 @@ impl MobileRelayManager {
             sessions: Mutex::new(Vec::new()),
             pane_paths: Mutex::new(HashMap::new()),
             pane_ptys: Mutex::new(HashMap::new()),
+            ambiguous_mirrors: Mutex::new(HashMap::new()),
             mirror_subs: Mutex::new(HashMap::new()),
             recent_mobile_cmds: Mutex::new(HashMap::new()),
             command_tail: Mutex::new(None),
@@ -493,6 +502,7 @@ impl MobileRelayManager {
                 }
             }
         }
+        self.ambiguous_mirrors.lock().retain(|pty_id, _| pane_ptys.values().any(|current| current == pty_id));
         *self.pane_ptys.lock() = pane_ptys;
 
         // 订阅中的 pane 已不在活跃集合(pane 关闭/AI 会话结束)→ PaneClosed
@@ -508,6 +518,17 @@ impl MobileRelayManager {
             let _ = self.send(DesktopToRelay::PaneClosed { pane_id });
         }
         *self.pane_paths.lock() = pane_paths;
+
+        let pane_ids: Vec<_> = self.pane_paths.lock().keys().cloned().collect();
+        for pane_id in pane_ids {
+            if matches!(self.mirror_locate_key(&pane_id), LocateKey::Ambiguous) {
+                let subscription = self.mirror_subs.lock().get(&pane_id)
+                    .map(|sub| (sub.messages.clone(), sub.runtime.clone()));
+                if let Some((messages, runtime)) = subscription {
+                    self.clear_mirror(&pane_id, &messages, &runtime);
+                }
+            }
+        }
 
         let next: Vec<MobileProject> = projects
             .into_iter()
@@ -748,7 +769,8 @@ impl MobileRelayManager {
     /// 这一轮的定位输入。绑定分两层,每轮重取(PTY 映射、hook 上报都可能后到):
     /// 1. hook 上报过会话身份 → 只认该会话的文件,未落盘就等(空镜像),
     ///    不退启发式——退了就会串到同项目其他 pane 的会话;
-    /// 2. 无会话身份(未启用 hook)→ 退回"项目最新文件 + AI 启动时刻下限"启发式。
+    /// 2. 无会话身份且同项目有多个可镜像的 pane → 等待身份,不猜测;同一轮会话不解除。
+    /// 3. 无会话身份且没有竞争 pane → "项目最新文件 + AI 启动时刻下限"启发式。
     ///
     /// 这几问都是查内存表,每轮问一遍没有代价;贵的是拿着答案去扫磁盘,
     /// 那一步由 [`MirrorLocator::needs_locate`] 把关。
@@ -757,6 +779,7 @@ impl MobileRelayManager {
         if let Some(pty) = pty_id
             && let Some(s) = self.host.hook_session(pty)
         {
+            self.ambiguous_mirrors.lock().remove(&pty);
             return LocateKey::Hook {
                 pty_id: pty,
                 agent: s.agent,
@@ -775,11 +798,66 @@ impl MobileRelayManager {
                 agent: agent.to_string(),
             };
         }
-        LocateKey::Heuristic {
+        let key = LocateKey::Heuristic {
             pty_id,
             agent,
             started: pty_id.and_then(|id| self.host.ai_session_started_at(id)),
+        };
+        if let Some(pty) = pty_id {
+            let mut ambiguous = self.ambiguous_mirrors.lock();
+            if ambiguous.get(&pty) == Some(&key) {
+                return LocateKey::Ambiguous;
+            }
+            ambiguous.remove(&pty);
         }
+        if self.mirror_has_peer(pane_id) {
+            if let Some(pty) = pty_id {
+                self.ambiguous_mirrors.lock().insert(pty, key);
+            }
+            return LocateKey::Ambiguous;
+        }
+        key
+    }
+
+    fn mirror_has_peer(&self, pane_id: &str) -> bool {
+        let peers: Vec<_> = {
+            let paths = self.pane_paths.lock();
+            let Some(project_path) = paths.get(pane_id) else { return false };
+            paths.iter().filter(|(other_id, other_path)| {
+                other_id.as_str() != pane_id && if cfg!(windows) {
+                    mt_core::path_key::windows_eq_key(other_path) == mt_core::path_key::windows_eq_key(project_path)
+                } else {
+                    Path::new(other_path.as_str()) == Path::new(project_path.as_str())
+                }
+            }).map(|(other_id, _)| other_id.clone()).collect()
+        };
+        let ptys = self.pane_ptys.lock().clone();
+        peers.iter().any(|other_id| {
+            let agent = ptys.get(other_id).and_then(|pty| {
+                self.host.hook_session(*pty).and_then(|session| session.agent)
+                    .or_else(|| self.host.ai_session_agent(*pty))
+            });
+            agent.as_deref().is_none_or(mirror::agent_has_session_log)
+        })
+    }
+
+    fn clear_mirror(
+        &self,
+        pane_id: &str,
+        messages: &Mutex<Vec<MirrorMessage>>,
+        runtime: &Mutex<Option<MirrorRuntime>>,
+    ) -> bool {
+        let mut slot = runtime.lock();
+        let had_runtime = slot.take().is_some();
+        let mut cached = messages.lock();
+        let changed = had_runtime || !cached.is_empty();
+        cached.clear();
+        if changed {
+            let _ = self.send(DesktopToRelay::MirrorSnapshot {
+                pane_id: pane_id.into(), messages: vec![], has_more: false,
+            });
+        }
+        changed
     }
 
     /// 镜像轮询的一轮:必要时重新定位,换绑或增量泵。**全是阻塞文件 IO**,
@@ -803,18 +881,21 @@ impl MobileRelayManager {
         match locator.resolved.clone() {
             None => {
                 // 属于本轮会话的文件尚未出现(AI 刚启动还没落盘):先给空快照,出现后再重发
-                if !locator.sent_initial {
-                    locator.sent_initial = true;
+                let cleared = self.clear_mirror(&job.pane_id, &job.messages, &job.runtime);
+                if !locator.sent_initial && !cleared {
                     let _ = self.send(DesktopToRelay::MirrorSnapshot {
                         pane_id: job.pane_id.clone(),
                         messages: vec![],
                         has_more: false,
                     });
                 }
+                locator.sent_initial = true;
             }
             Some((path, agent)) if bound.as_deref() != Some(path.as_path()) => {
                 // 首次绑定或换绑到更新的会话文件:全量解析 + 重发快照
-                if self.rebind_mirror(job, path, agent) {
+                if let Some(key) = locator.key.as_ref()
+                    && self.rebind_mirror(job, path, agent, key)
+                {
                     locator.sent_initial = true;
                 }
             }
@@ -832,14 +913,17 @@ impl MobileRelayManager {
     /// 全量同样要改标来源:移动端发起的新会话里第一条指令、重订阅时早先发过的
     /// 移动端指令都只在这份全量里出现,不改标就一律显示成桌面输入。改标也在锁外
     /// (只取叶子锁 `recent_mobile_cmds`)。
-    fn rebind_mirror(&self, job: &MirrorJob, path: PathBuf, agent: MirrorAgent) -> bool {
+    fn rebind_mirror(&self, job: &MirrorJob, path: PathBuf, agent: MirrorAgent, expected_key: &LocateKey) -> bool {
         let mut parser = MirrorParser::new(agent, &job.project_path);
         let Some((mut msgs, cursor)) = mirror::parse_whole_file(&path, &mut parser) else {
             return false;
         };
         self.relabel_mobile_sources(&job.pane_id, &mut msgs, RelabelScope::History);
-        let (page, has_more) = {
+        {
             let mut slot = job.runtime.lock();
+            if self.mirror_locate_key(&job.pane_id) != *expected_key {
+                return false;
+            }
             *slot = Some(MirrorRuntime {
                 parser,
                 path,
@@ -847,13 +931,13 @@ impl MobileRelayManager {
             });
             let mut m = job.messages.lock();
             *m = msgs;
-            history_slice(&m, None, MIRROR_PAGE_SIZE)
-        };
-        let _ = self.send(DesktopToRelay::MirrorSnapshot {
-            pane_id: job.pane_id.clone(),
-            messages: page,
-            has_more,
-        });
+            let (page, has_more) = history_slice(&m, None, MIRROR_PAGE_SIZE);
+            let _ = self.send(DesktopToRelay::MirrorSnapshot {
+                pane_id: job.pane_id.clone(),
+                messages: page,
+                has_more,
+            });
+        }
         true
     }
 
@@ -1157,6 +1241,9 @@ async fn connect_once(
 /// 处理中转推来的消息(已握手连接上)。
 fn handle_relay_message(manager: &Arc<MobileRelayManager>, text: &str) {
     match serde_json::from_str::<RelayToDesktop>(text) {
+        Ok(request @ (RelayToDesktop::RequestSessionList { .. }
+            | RelayToDesktop::RequestSessionContent { .. }
+            | RelayToDesktop::ResumeAiSession { .. })) => handle_history_request(manager, request),
         Ok(RelayToDesktop::PairingCode { code }) => manager.events.pairing_code(code),
         Ok(RelayToDesktop::PairingUpdate { paired }) => manager.set_paired(paired),
         Ok(RelayToDesktop::PairedDevices { devices }) => {
@@ -1244,6 +1331,8 @@ pub struct RenamePanePayload {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartSessionPayload {
+    #[serde(skip)]
+    pub resume: Option<ResumeSession>,
     pub request_id: String,
     pub project_id: String,
     pub launcher_id: String,
@@ -1253,6 +1342,341 @@ pub struct StartSessionPayload {
     pub shell_name: Option<String>,
     /// 要写入 PTY 的启动命令
     pub command: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResumeSession {
+    pub agent: String,
+    pub session_id: String,
+    pub project_path: String,
+    pub cwd: Option<String>,
+}
+
+enum HistoryAction {
+    Reply(DesktopToRelay),
+    Resume(StartSessionPayload),
+}
+
+fn history_failure(request: &RelayToDesktop, reason: StartSessionFailReason) -> DesktopToRelay {
+    match request {
+        RelayToDesktop::RequestSessionList {
+            request_id,
+            project_id,
+            ..
+        } => DesktopToRelay::SessionList {
+            request_id: request_id.clone(),
+            project_id: project_id.clone(),
+            sessions: Vec::new(),
+            has_more: false,
+            reason: Some(reason),
+        },
+        RelayToDesktop::RequestSessionContent {
+            request_id,
+            project_id,
+            agent,
+            session_id,
+            ..
+        } => DesktopToRelay::SessionContent {
+            revision: None,
+            request_id: request_id.clone(),
+            project_id: project_id.clone(),
+            agent: agent.clone(),
+            session_id: session_id.clone(),
+            messages: Vec::new(),
+            has_more: false,
+            reason: Some(reason),
+        },
+        RelayToDesktop::ResumeAiSession { request_id, .. } => DesktopToRelay::StartSessionReceipt {
+            request_id: request_id.clone(),
+            ok: false,
+            pane_id: None,
+            reason: Some(reason),
+        },
+        _ => unreachable!(),
+    }
+}
+
+fn handle_history_request(manager: &Arc<MobileRelayManager>, request: RelayToDesktop) {
+    let Ok(permit) = manager.history_slots.clone().try_acquire_owned() else {
+        let _ = manager.send(history_failure(
+            &request,
+            StartSessionFailReason::ReadFailed,
+        ));
+        return;
+    };
+    let background = manager.clone();
+    let fallback = request.clone();
+    if !manager.spawn(async move {
+        let host = background.host.clone();
+        let query = request.clone();
+        let result =
+            tokio::task::spawn_blocking(move || read_history_request(host.as_ref(), &query)).await;
+        drop(permit);
+        match result {
+            Ok(Ok(HistoryAction::Reply(reply))) => {
+                let _ = background.send(reply);
+            }
+            Ok(Ok(HistoryAction::Resume(payload))) => background.events.start_session(payload),
+            result => {
+                let reason = result
+                    .ok()
+                    .and_then(Result::err)
+                    .unwrap_or(StartSessionFailReason::ReadFailed);
+                let _ = background.send(history_failure(&request, reason));
+            }
+        }
+    }) {
+        let _ = manager.send(history_failure(
+            &fallback,
+            StartSessionFailReason::ReadFailed,
+        ));
+    }
+}
+
+fn history_message_page(
+    messages: Vec<mt_ai::sessions::AiSessionMessage>,
+    before_seq: Option<u64>,
+) -> Result<(Vec<MirrorMessage>, bool), StartSessionFailReason> {
+    let end = before_seq.map_or(messages.len(), |before| {
+        usize::try_from(before)
+            .unwrap_or(usize::MAX)
+            .min(messages.len())
+    });
+    let mut page = Vec::new();
+    let mut bytes = 0;
+    for (index, message) in messages
+        .into_iter()
+        .enumerate()
+        .take(end)
+        .rev()
+        .take(HISTORY_PAGE_SIZE)
+    {
+        let message = MirrorMessage {
+            seq: index as u64,
+            source: if message.role == "user" {
+                "desktop".into()
+            } else {
+                message.role
+            },
+            content: message.content,
+            timestamp: message.timestamp,
+            ..Default::default()
+        };
+        let size = serde_json::to_vec(&message)
+            .map_err(|_| StartSessionFailReason::ReadFailed)?
+            .len();
+        if bytes + size > HISTORY_PAGE_BYTES {
+            if page.is_empty() {
+                return Err(StartSessionFailReason::ReadFailed);
+            }
+            break;
+        }
+        bytes += size;
+        page.push(message);
+    }
+    page.reverse();
+    let has_more = page.first().is_some_and(|message| message.seq > 0);
+    Ok((page, has_more))
+}
+
+fn history_revision(messages: &[mt_ai::sessions::AiSessionMessage]) -> String {
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    for message in messages {
+        (&message.role, &message.content, &message.timestamp).hash(&mut hash);
+    }
+    format!("{:016x}", hash.finish())
+}
+
+fn history_session_belongs(
+    session: &mt_ai::sessions::AiSession,
+    agent: &str,
+    session_id: &str,
+) -> bool {
+    session.id == session_id
+        && session.session_type == agent
+        && session.wsl_distro.is_none()
+        && session.ssh_connection_id.is_none()
+}
+
+fn read_history_request(
+    host: &dyn RelayHost,
+    request: &RelayToDesktop,
+) -> Result<HistoryAction, StartSessionFailReason> {
+    let project_id = match request {
+        RelayToDesktop::RequestSessionList { project_id, .. }
+        | RelayToDesktop::RequestSessionContent { project_id, .. }
+        | RelayToDesktop::ResumeAiSession { project_id, .. } => project_id,
+        _ => unreachable!(),
+    };
+    let project = host
+        .project(project_id)
+        .ok_or(StartSessionFailReason::ProjectNotFound)?;
+    if !can_start_session(&project.path, project.ssh_connection_id.as_deref()) {
+        return Err(StartSessionFailReason::NotSupported);
+    }
+    if let RelayToDesktop::RequestSessionContent {
+        agent, session_id, ..
+    }
+    | RelayToDesktop::ResumeAiSession {
+        agent, session_id, ..
+    } = request
+    {
+        if !mt_ai::sessions::session_id_path_safe(session_id)
+            || !mt_ai::sessions::agent_has_session_log(agent)
+        {
+            return Err(StartSessionFailReason::SessionNotFound);
+        }
+    }
+    let mut sessions = mt_ai::sessions::get_ai_sessions(project.path.clone())
+        .map_err(|_| StartSessionFailReason::ReadFailed)?;
+    sessions.sort_by(|left, right| {
+        right
+            .timestamp
+            .cmp(&left.timestamp)
+            .then_with(|| left.session_type.cmp(&right.session_type))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let action = match request {
+        RelayToDesktop::RequestSessionList {
+            request_id,
+            agent,
+            offset,
+            ..
+        } => {
+            let filtered: Vec<_> = sessions
+                .into_iter()
+                .filter(|session| {
+                    session.wsl_distro.is_none()
+                        && session.ssh_connection_id.is_none()
+                        && agent
+                            .as_ref()
+                            .is_none_or(|agent| agent == &session.session_type)
+                })
+                .skip(*offset as usize)
+                .take(HISTORY_PAGE_SIZE + 1)
+                .collect();
+            let has_more = filtered.len() > HISTORY_PAGE_SIZE;
+            HistoryAction::Reply(DesktopToRelay::SessionList {
+                request_id: request_id.clone(),
+                project_id: project_id.clone(),
+                has_more,
+                reason: None,
+                sessions: filtered
+                    .into_iter()
+                    .take(HISTORY_PAGE_SIZE)
+                    .map(|session| HistorySession {
+                        can_resume: mt_ai::agent::resume_command(
+                            Some(&session.session_type),
+                            &session.id,
+                        )
+                        .is_some(),
+                        id: session.id,
+                        agent: session.session_type,
+                        title: session.title,
+                        timestamp: session.timestamp,
+                        model: session.model,
+                    })
+                    .collect(),
+            })
+        }
+        RelayToDesktop::RequestSessionContent {
+            request_id,
+            agent,
+            session_id,
+            ..
+        }
+        | RelayToDesktop::ResumeAiSession {
+            request_id,
+            agent,
+            session_id,
+            ..
+        } => {
+            let session = sessions
+                .into_iter()
+                .find(|session| history_session_belongs(session, agent, session_id))
+                .ok_or(StartSessionFailReason::SessionNotFound)?;
+            match request {
+                RelayToDesktop::RequestSessionContent {
+                    before_seq,
+                    revision,
+                    ..
+                } => {
+                    let messages = mt_ai::sessions::get_ai_session_content(
+                        agent.clone(),
+                        session_id.clone(),
+                        project.path.clone(),
+                        None,
+                    )
+                    .map_err(|_| StartSessionFailReason::ReadFailed)?;
+                    let current_revision = history_revision(&messages);
+                    if before_seq.is_some()
+                        && revision
+                            .as_ref()
+                            .is_none_or(|revision| revision != &current_revision)
+                    {
+                        return Err(StartSessionFailReason::SessionChanged);
+                    }
+                    let (messages, has_more) = history_message_page(messages, *before_seq)?;
+                    HistoryAction::Reply(DesktopToRelay::SessionContent {
+                        revision: Some(current_revision),
+                        request_id: request_id.clone(),
+                        project_id: project_id.clone(),
+                        agent: agent.clone(),
+                        session_id: session_id.clone(),
+                        messages,
+                        has_more,
+                        reason: None,
+                    })
+                }
+                _ => {
+                    let command = mt_ai::agent::resume_command(Some(agent), session_id)
+                        .ok_or(StartSessionFailReason::NotSupported)?;
+                    if mirror::resolve_session_file_by_id(&project.path, Some(agent), session_id)
+                        .is_none()
+                    {
+                        return Err(StartSessionFailReason::SessionNotFound);
+                    }
+                    let cwd = if mt_ai::AgentKind::parse(agent)
+                        .is_some_and(|kind| kind.looks_up_session_cwd())
+                    {
+                        let cwd = mt_ai::sessions::lookup_ai_session_cwd(session_id.clone())
+                            .ok_or(StartSessionFailReason::SessionNotFound)?;
+                        let root = Path::new(&project.path)
+                            .canonicalize()
+                            .map_err(|_| StartSessionFailReason::ReadFailed)?;
+                        let resolved = Path::new(&cwd)
+                            .canonicalize()
+                            .map_err(|_| StartSessionFailReason::ReadFailed)?;
+                        if !resolved.starts_with(root) {
+                            return Err(StartSessionFailReason::NotSupported);
+                        }
+                        Some(cwd)
+                    } else {
+                        None
+                    };
+                    HistoryAction::Resume(StartSessionPayload {
+                        resume: Some(ResumeSession {
+                            agent: agent.clone(),
+                            session_id: session_id.clone(),
+                            project_path: project.path.clone(),
+                            cwd,
+                        }),
+                        request_id: request_id.clone(),
+                        project_id: project_id.clone(),
+                        launcher_id: String::new(),
+                        launcher_name: session.title,
+                        shell_name: None,
+                        command,
+                    })
+                }
+            }
+        }
+        _ => unreachable!(),
+    };
+    if host.project(project_id).as_ref() != Some(&project) {
+        return Err(StartSessionFailReason::ProjectNotFound);
+    }
+    Ok(action)
 }
 
 /// 校验移动端的发起请求,通过则交给上层执行,不通过直接回失败回执。
@@ -1283,6 +1707,7 @@ fn handle_start_ai_session(
     };
 
     manager.events.start_session(StartSessionPayload {
+        resume: None,
         request_id,
         project_id,
         launcher_id,
@@ -1602,6 +2027,130 @@ mod tests {
     use super::*;
     use crate::host::NoopRelayHost;
 
+    #[test]
+    fn saved_history_pages_backwards_without_dropping_messages() {
+        let messages = || {
+            (0..120)
+                .map(|index| mt_ai::sessions::AiSessionMessage {
+                    role: "user".into(),
+                    content: format!("message-{index}"),
+                    timestamp: String::new(),
+                })
+                .collect()
+        };
+        let (latest, has_more) = history_message_page(messages(), None).unwrap();
+        assert_eq!(latest.len(), 50);
+        assert_eq!((latest[0].seq, latest[49].seq), (70, 119));
+        assert_eq!(latest[0].source, "desktop");
+        assert!(has_more);
+        let (middle, has_more) = history_message_page(messages(), Some(70)).unwrap();
+        assert_eq!((middle[0].seq, middle[49].seq), (20, 69));
+        assert!(has_more);
+        let (earliest, has_more) = history_message_page(messages(), Some(20)).unwrap();
+        assert_eq!(earliest.len(), 20);
+        assert_eq!((earliest[0].seq, earliest[19].seq), (0, 19));
+        assert!(!has_more);
+        assert_eq!(
+            history_message_page(messages(), Some(0)).unwrap(),
+            (Vec::new(), false)
+        );
+    }
+
+    #[test]
+    fn saved_history_limits_wire_bytes_without_silently_truncating_a_message() {
+        let oversized = mt_ai::sessions::AiSessionMessage {
+            role: "assistant".into(),
+            content: "\u{0001}".repeat(HISTORY_PAGE_BYTES / 6 + 1),
+            timestamp: String::new(),
+        };
+        assert_eq!(
+            history_message_page(vec![oversized.clone()], None).unwrap_err(),
+            StartSessionFailReason::ReadFailed
+        );
+        let small = mt_ai::sessions::AiSessionMessage {
+            content: "visible".into(),
+            ..oversized.clone()
+        };
+        let (page, has_more) = history_message_page(vec![oversized, small], None).unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].content, "visible");
+        assert!(has_more);
+    }
+
+    #[test]
+    fn saved_history_revision_detects_rewrites_and_branch_changes() {
+        let mut messages = vec![mt_ai::sessions::AiSessionMessage {
+            role: "assistant".into(),
+            content: "original answer".into(),
+            timestamp: "2026-11-21".into(),
+        }];
+        let revision = history_revision(&messages);
+        assert_eq!(revision, history_revision(&messages));
+        messages[0].content = "different branch".into();
+        assert_ne!(revision, history_revision(&messages));
+    }
+
+    #[test]
+    fn saved_history_identity_requires_matching_agent_and_local_source() {
+        let mut session = mt_ai::sessions::AiSession {
+            id: "session-1".into(),
+            session_type: "codex".into(),
+            title: String::new(),
+            timestamp: String::new(),
+            model: None,
+            wsl_distro: None,
+            ssh_connection_id: None,
+        };
+        assert!(history_session_belongs(&session, "codex", "session-1"));
+        assert!(!history_session_belongs(&session, "claude", "session-1"));
+        assert!(!history_session_belongs(&session, "codex", "other-session"));
+        session.wsl_distro = Some("Ubuntu".into());
+        assert!(!history_session_belongs(&session, "codex", "session-1"));
+        session.wsl_distro = None;
+        session.ssh_connection_id = Some("remote".into());
+        assert!(!history_session_belongs(&session, "codex", "session-1"));
+    }
+
+    #[test]
+    fn saved_history_rejects_missing_projects_remote_roots_and_path_traversal() {
+        let host = FakeHost::default();
+        let request = RelayToDesktop::RequestSessionContent {
+            request_id: "request-1".into(),
+            project_id: "project-1".into(),
+            agent: "codex".into(),
+            session_id: "../secret".into(),
+            before_seq: None,
+            revision: None,
+        };
+        assert_eq!(
+            read_history_request(&host, &request).err(),
+            Some(StartSessionFailReason::ProjectNotFound)
+        );
+        *host.project.lock() = Some(RelayProject {
+            path: "/project".into(),
+            ssh_connection_id: Some("ssh-1".into()),
+        });
+        assert_eq!(
+            read_history_request(&host, &request).err(),
+            Some(StartSessionFailReason::NotSupported)
+        );
+        *host.project.lock() = Some(RelayProject {
+            path: r"\\wsl$\Ubuntu\home\project".into(),
+            ssh_connection_id: None,
+        });
+        assert_eq!(
+            read_history_request(&host, &request).err(),
+            Some(StartSessionFailReason::NotSupported)
+        );
+        *host.project.lock() = Some(RelayProject {
+            path: "/project".into(),
+            ssh_connection_id: None,
+        });
+        assert_eq!(
+            read_history_request(&host, &request).err(),
+            Some(StartSessionFailReason::SessionNotFound)
+        );
+    }
     /// 不接线的 manager:测的都是纯逻辑(退避 / URL / diff / 改标),
     /// 不碰宿主也不建连接。
     fn test_manager() -> MobileRelayManager {
@@ -1803,6 +2352,7 @@ mod tests {
     fn start_session_payload_serializes_camel_case() {
         // 载荷形状钉住:移动端面板与旧前端按 camelCase 读同一份字段名
         let json = serde_json::to_string(&StartSessionPayload {
+            resume: None,
             request_id: "req-1".into(),
             project_id: "p1".into(),
             launcher_id: "l1".into(),
@@ -2390,7 +2940,9 @@ mod tests {
     /// 可控的宿主:hook 身份 / 输入检测的 agent / AI 启动时刻都由测试随手改。
     #[derive(Default)]
     struct FakeHost {
+        project: Mutex<Option<RelayProject>>,
         hook: Mutex<Option<HookSessionId>>,
+        hook_sessions: Mutex<HashMap<u32, HookSessionId>>,
         agent: Mutex<Option<String>>,
         started: Mutex<Option<SystemTime>>,
     }
@@ -2400,13 +2952,14 @@ mod tests {
             Vec::new()
         }
         fn project(&self, _project_id: &str) -> Option<RelayProject> {
-            None
+            self.project.lock().clone()
         }
         fn write_pty(&self, _pty_id: u32, _data: String) -> Result<(), String> {
             Ok(())
         }
-        fn hook_session(&self, _pty_id: u32) -> Option<HookSessionId> {
-            self.hook.lock().clone()
+        fn hook_session(&self, pty_id: u32) -> Option<HookSessionId> {
+            self.hook_sessions.lock().get(&pty_id).cloned()
+                .or_else(|| self.hook.lock().clone())
         }
         fn ai_session_agent(&self, _pty_id: u32) -> Option<String> {
             self.agent.lock().clone()
@@ -2471,6 +3024,47 @@ mod tests {
         fn bound(&self) -> Option<PathBuf> {
             self.job.runtime.lock().as_ref().map(|rt| rt.path.clone())
         }
+
+        fn sync_codex_panes(&self, panes: &[(&str, u32)]) {
+            *self.host.agent.lock() = Some("codex".into());
+            self.manager.update_sessions(vec![SyncProject {
+                project_id: "project".into(),
+                name: "Project".into(),
+                path: self.job.project_path.clone(),
+                ssh_connection_id: None,
+                group_path: vec![],
+                panes: panes.iter().map(|(pane_id, pty_id)| SyncPane {
+                    pane_id: (*pane_id).into(),
+                    title: "Codex".into(),
+                    status: "ai-idle".into(),
+                    pty_id: Some(*pty_id),
+                    needs_attention: false,
+                }).collect(),
+            }]);
+        }
+
+        fn codex_file(&self, session_id: &str, reply: &str) -> PathBuf {
+            let path = self.dir.join(format!("{session_id}.jsonl"));
+            let metadata = serde_json::json!({
+                "type": "session_meta",
+                "payload": {"id": session_id, "cwd": self.job.project_path},
+            });
+            let message = serde_json::json!({
+                "type": "response_item",
+                "payload": {"role": "assistant", "content": [{"type": "output_text", "text": reply}]},
+            });
+            std::fs::write(&path, format!("{metadata}\n{message}\n")).unwrap();
+            path
+        }
+
+        fn mirror_job(&self, pane_id: &str) -> MirrorJob {
+            MirrorJob {
+                pane_id: pane_id.into(),
+                project_path: self.job.project_path.clone(),
+                messages: Arc::new(Mutex::new(Vec::new())),
+                runtime: Arc::new(Mutex::new(None)),
+            }
+        }
     }
 
     impl Drop for MirrorFixture {
@@ -2496,6 +3090,104 @@ mod tests {
             agent: Some("claude-code".into()),
             session_id: session_id.into(),
         })
+    }
+
+    #[test]
+    fn two_idle_codex_panes_without_identity_do_not_share_latest_transcript() {
+        let fixture = MirrorFixture::new("two-codex-panes");
+        fixture.sync_codex_panes(&[("pane-1", 7), ("pane-2", 8)]);
+        let latest = fixture.codex_file("first", "first Codex reply");
+        let second = fixture.mirror_job("pane-2");
+        for job in [&fixture.job, &second] {
+            fixture.manager.mirror_round(job, &mut MirrorLocator::default(), Instant::now(), |_, key| {
+                match key {
+                    LocateKey::Heuristic { .. } => Some((latest.clone(), MirrorAgent::Codex)),
+                    _ => None,
+                }
+            });
+        }
+        assert!(
+            second.messages.lock().is_empty(),
+            "第二个 Codex 不能显示第一个的会话: {:?}",
+            second.messages.lock().iter().map(|message| &message.content).collect::<Vec<_>>()
+        );
+        assert!(fixture.texts().is_empty(), "缺少身份时两条会话都不应猜测绑定");
+    }
+
+    #[test]
+    fn two_idle_codex_panes_with_hook_identity_keep_distinct_transcripts() {
+        let fixture = MirrorFixture::new("two-codex-hooks");
+        for (pty_id, session_id) in [(7, "first"), (8, "second")] {
+            fixture.host.hook_sessions.lock().insert(pty_id, HookSessionId {
+                agent: Some("codex".into()), session_id: session_id.into(),
+            });
+        }
+        fixture.sync_codex_panes(&[("pane-1", 7), ("pane-2", 8)]);
+        let paths = HashMap::from([
+            ("first", fixture.codex_file("first", "first Codex reply")),
+            ("second", fixture.codex_file("second", "second Codex reply")),
+        ]);
+        for (pane_id, expected) in [("pane-1", "first Codex reply"), ("pane-2", "second Codex reply"), ("pane-1", "first Codex reply")] {
+            let job = fixture.mirror_job(pane_id);
+            fixture.manager.mirror_round(&job, &mut MirrorLocator::default(), Instant::now(), |_, key| {
+                match key {
+                    LocateKey::Hook { session_id, .. } => paths.get(session_id.as_str()).cloned()
+                        .map(|path| (path, MirrorAgent::Codex)),
+                    _ => None,
+                }
+            });
+            assert_eq!(job.messages.lock().iter().map(|message| message.content.clone()).collect::<Vec<_>>(), [expected]);
+        }
+    }
+
+    #[test]
+    fn parallel_codex_ambiguity_clears_cached_mirror_and_stays_after_peer_closes() {
+        let fixture = MirrorFixture::new("codex-cached-ambiguity");
+        fixture.sync_codex_panes(&[("pane-1", 7)]);
+        let path = fixture.codex_file("first", "first Codex reply");
+        let locate = |_: &str, key: &LocateKey| match key {
+            LocateKey::Heuristic { .. } | LocateKey::Hook { .. } => Some((path.clone(), MirrorAgent::Codex)),
+            _ => None,
+        };
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        *fixture.manager.outbound.lock() = Some(sender);
+        fixture.round(&mut MirrorLocator::default(), Instant::now(), locate);
+        assert_eq!(fixture.texts(), ["first Codex reply"]);
+        let (cancel_tx, _) = watch::channel(false);
+        fixture.manager.mirror_subs.lock().insert("pane-1".into(), MirrorSub {
+            cancel_tx,
+            messages: fixture.job.messages.clone(),
+            runtime: fixture.job.runtime.clone(),
+        });
+        while receiver.try_recv().is_ok() {}
+        fixture.sync_codex_panes(&[("pane-1", 7), ("pane-2", 8)]);
+        assert_eq!(fixture.bound(), None, "出现竞争会话时必须立即清掉旧绑定");
+        assert!(fixture.texts().is_empty());
+        assert!(std::iter::from_fn(|| receiver.try_recv().ok()).any(|message| {
+            matches!(message, DesktopToRelay::MirrorSnapshot { pane_id, messages, .. }
+                if pane_id == "pane-1" && messages.is_empty())
+        }), "旧内容必须通过空快照从移动端撤下");
+        fixture.sync_codex_panes(&[("pane-1", 7)]);
+        fixture.round(&mut MirrorLocator::default(), Instant::now(), locate);
+        assert!(fixture.texts().is_empty(), "另一会话关闭后其最新记录仍可能留在磁盘,不能重新猜测");
+        fixture.host.hook_sessions.lock().insert(7, HookSessionId {
+            agent: Some("codex".into()), session_id: "first".into(),
+        });
+        fixture.round(&mut MirrorLocator::default(), Instant::now(), locate);
+        assert_eq!(fixture.texts(), ["first Codex reply"], "精确身份到达后应恢复镜像");
+    }
+
+    #[test]
+    fn codex_mirror_discards_location_if_peer_appears_during_lookup() {
+        let fixture = MirrorFixture::new("codex-locate-race");
+        fixture.sync_codex_panes(&[("pane-1", 7)]);
+        let path = fixture.codex_file("first", "first Codex reply");
+        fixture.round(&mut MirrorLocator::default(), Instant::now(), |_, _| {
+            fixture.sync_codex_panes(&[("pane-1", 7), ("pane-2", 8)]);
+            Some((path.clone(), MirrorAgent::Codex))
+        });
+        assert!(fixture.texts().is_empty(), "磁盘定位期间出现竞争 pane 后,不得安装旧定位结果");
+        assert_eq!(fixture.bound(), None);
     }
 
     /// hook 身份没变且已绑上:此后只做增量泵,不再扫目录(时间过多久都一样);

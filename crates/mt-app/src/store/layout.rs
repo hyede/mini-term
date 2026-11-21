@@ -41,11 +41,12 @@ impl AppStore {
         project_id: &str,
         shell: ShellConfig,
         custom_title: Option<String>,
+        cwd: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<String> {
         let project = self.project(project_id)?.clone();
-        let mut pane = self.spawn_pane(&project, &shell, None, window, cx)?;
+        let mut pane = self.spawn_pane(&project, &shell, cwd, window, cx)?;
         pane.custom_title = custom_title;
         let pane_id = pane.id.clone();
         let pty_id = pane.pty_id;
